@@ -72,7 +72,7 @@
 #include <sys/param.h>
 #include <sys/types.h>
 #include "bitops.h"
-#include <sys/cprng.h>
+// #include <sys/cprng.h>
 #include <sys/cpu.h>
 #include <sys/interrupt.h>
 #include <sys/module.h>
