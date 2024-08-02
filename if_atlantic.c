@@ -73,7 +73,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/types.h>
 #include "bitops.h"
 // #include <sys/cprng.h>
-#include <sys/cpu.h>
+#include <machine/cpu.h>
 #include <sys/interrupt.h>
 #include <sys/module.h>
 #include <sys/pcq.h>
