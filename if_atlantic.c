@@ -62,12 +62,12 @@
  */
 
 #include <sys/cdefs.h>
-// __KERNEL_RCSID(0, "$NetBSD: if_aq.c,v 1.49 2024/07/05 04:31:51 rin Exp $");
+__FBSDID("$FreeBSD$");
 
-#ifdef _KERNEL_OPT
-#include "opt_if_aq.h"
-#include "sysmon_envsys.h"
-#endif
+// #ifdef _KERNEL_OPT
+// #include "opt_if_aq.h"
+// #include "sysmon_envsys.h"
+// #endif
 
 #include <sys/param.h>
 #include <sys/types.h>
