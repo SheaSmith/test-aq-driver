@@ -78,7 +78,9 @@ __FBSDID("$FreeBSD$");
 #include <sys/endian.h>
 #include <sys/systm.h>
 #include <machine/cpu.h>
-#include <sys/interrupt.h>
+#include <sys/socket.h>
+
+// #include <sys/interrupt.h>
 #include <sys/module.h>
 #include <sys/pcq.h>
 
@@ -1830,13 +1832,13 @@ aq_attach(device_t parent, device_t self, void *aux)
 		sc->sc_no_link_intr = false;
 		aprint_debug_dev(sc->sc_dev, "MSI-X failed: %d, trying MSI",
 		    error);
-		error = aq_setup_legacy(sc, pa, PCI_INTR_TYPE_MSI);
+		// error = aq_setup_legacy(sc, pa, PCI_INTR_TYPE_MSI);
 	}
 	if (error != 0) {
 		/* if MSI failed, fallback to INTx */
 		aprint_debug_dev(sc->sc_dev, "MSI failed: %d, trying legacy",
 		    error);
-		error = aq_setup_legacy(sc, pa, PCI_INTR_TYPE_INTX);
+		// error = aq_setup_legacy(sc, pa, PCI_INTR_TYPE_INTX);
 	}
 	if (error != 0)
 		goto attach_failure;
@@ -2248,35 +2250,35 @@ aq_setup_msix(struct aq_softc *sc, struct pci_attach_args *pa)
 
 }
 
-static int
-aq_setup_legacy(struct aq_softc *sc, struct pci_attach_args *pa,
-    pci_intr_type_t inttype)
-{
-	int counts[PCI_INTR_TYPE_SIZE];
-	int error, nintr;
+// static int
+// aq_setup_legacy(struct aq_softc *sc, struct pci_attach_args *pa,
+//     pci_intr_type_t inttype)
+// {
+// 	int counts[PCI_INTR_TYPE_SIZE];
+// 	int error, nintr;
 
-	nintr = 1;
+// 	nintr = 1;
 
-	memset(counts, 0, sizeof(counts));
-	counts[inttype] = nintr;
+// 	memset(counts, 0, sizeof(counts));
+// 	counts[inttype] = nintr;
 
-	error = pci_intr_alloc(pa, &sc->sc_intrs, counts, inttype);
-	if (error != 0) {
-		aprint_error_dev(sc->sc_dev,
-		    "failed to allocate%s interrupts\n",
-		    (inttype == PCI_INTR_TYPE_MSI) ? " MSI" : "");
-		return error;
-	}
-	error = aq_establish_intr(sc, 0, NULL, aq_legacy_intr, sc,
-	    device_xname(sc->sc_dev));
-	if (error == 0) {
-		sc->sc_nintrs = nintr;
-	} else {
-		pci_intr_release(sc->sc_pc, sc->sc_intrs, nintr);
-		sc->sc_nintrs = 0;
-	}
-	return error;
-}
+// 	error = pci_intr_alloc(pa, &sc->sc_intrs, counts, inttype);
+// 	if (error != 0) {
+// 		aprint_error_dev(sc->sc_dev,
+// 		    "failed to allocate%s interrupts\n",
+// 		    (inttype == PCI_INTR_TYPE_MSI) ? " MSI" : "");
+// 		return error;
+// 	}
+// 	error = aq_establish_intr(sc, 0, NULL, aq_legacy_intr, sc,
+// 	    device_xname(sc->sc_dev));
+// 	if (error == 0) {
+// 		sc->sc_nintrs = nintr;
+// 	} else {
+// 		pci_intr_release(sc->sc_pc, sc->sc_intrs, nintr);
+// 		sc->sc_nintrs = 0;
+// 	}
+// 	return error;
+// }
 
 static void
 aq1_global_software_reset(struct aq_softc *sc)
