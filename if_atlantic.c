@@ -82,7 +82,7 @@ __FBSDID("$FreeBSD$");
 
 // #include <sys/interrupt.h>
 #include <sys/module.h>
-#include <sys/pcq.h>
+#include "pcq.h"
 
 #include <net/bpf.h>
 #include <net/if.h>
