@@ -93,7 +93,7 @@ __FBSDID("$FreeBSD$");
 
 #include <dev/pci/pcivar.h>
 #include <dev/pci/pcireg.h>
-#include <dev/sysmon/sysmonvar.h>
+// #include <dev/sysmon/sysmonvar.h>
 
 /* Aquantia Corp. */
 #define	PCI_PRODUCT_AQUANTIA_AQC100	0x00b1		/* AQC100 10 Gigabit Network Adapter */
@@ -1312,9 +1312,9 @@ struct aq_firmware_ops {
 	int (*get_mode)(struct aq_softc *, aq_hw_fw_mpi_state_t *,
 	    aq_link_speed_t *, aq_link_fc_t *, aq_link_eee_t *);
 	int (*get_stats)(struct aq_softc *, aq_hw_stats_s_t *);
-#if NSYSMON_ENVSYS > 0
-	int (*get_temperature)(struct aq_softc *, uint32_t *);
-#endif
+// #if NSYSMON_ENVSYS > 0
+// 	int (*get_temperature)(struct aq_softc *, uint32_t *);
+// #endif
 };
 
 #ifdef AQ_EVENT_COUNTERS
@@ -1366,10 +1366,10 @@ struct aq_softc {
 	bool sc_use_txrx_independent_intr;
 	bool sc_no_link_intr;
 
-#if NSYSMON_ENVSYS > 0
-	struct sysmon_envsys *sc_sme;
-	envsys_data_t sc_sensor_temp;
-#endif
+// #if NSYSMON_ENVSYS > 0
+// 	struct sysmon_envsys *sc_sme;
+// 	envsys_data_t sc_sensor_temp;
+// #endif
 
 	callout_t sc_tick_ch;
 
@@ -1507,9 +1507,9 @@ static void aq_handle_reset_work(struct work *, void *);
 static void aq_unset_stopping_flags(struct aq_softc *);
 static void aq_set_stopping_flags(struct aq_softc *);
 
-#if NSYSMON_ENVSYS > 0
-static void aq_temp_refresh(struct sysmon_envsys *, envsys_data_t *);
-#endif
+// #if NSYSMON_ENVSYS > 0
+// static void aq_temp_refresh(struct sysmon_envsys *, envsys_data_t *);
+// #endif
 static void aq_tick(void *);
 static int aq_legacy_intr(void *);
 static int aq_link_intr(void *);
@@ -1546,9 +1546,9 @@ static int fw2x_set_mode(struct aq_softc *, aq_hw_fw_mpi_state_t,
 static int fw2x_get_mode(struct aq_softc *, aq_hw_fw_mpi_state_t *,
     aq_link_speed_t *, aq_link_fc_t *, aq_link_eee_t *);
 static int fw2x_get_stats(struct aq_softc *, aq_hw_stats_s_t *);
-#if NSYSMON_ENVSYS > 0
-static int fw2x_get_temperature(struct aq_softc *, uint32_t *);
-#endif
+// #if NSYSMON_ENVSYS > 0
+// static int fw2x_get_temperature(struct aq_softc *, uint32_t *);
+// #endif
 
 #ifndef AQ_WATCHDOG_TIMEOUT
 #define AQ_WATCHDOG_TIMEOUT 5
@@ -1566,9 +1566,9 @@ static int aq2_init_filter(struct aq_softc *);
 static int aq2_filter_art_set(struct aq_softc *, uint32_t, uint32_t, uint32_t,
     uint32_t);
 static int aq2_fw_get_stats(struct aq_softc *, aq_hw_stats_s_t *);
-#if NSYSMON_ENVSYS > 0
-static int aq2_fw_get_temperature(struct aq_softc *, uint32_t *);
-#endif
+// #if NSYSMON_ENVSYS > 0
+// static int aq2_fw_get_temperature(struct aq_softc *, uint32_t *);
+// #endif
 
 static const struct aq_firmware_ops aq_fw1x_ops = {
 	.reset = fw1x_reset,
@@ -1576,9 +1576,9 @@ static const struct aq_firmware_ops aq_fw1x_ops = {
 	.set_mode = fw1x_set_mode,
 	.get_mode = fw1x_get_mode,
 	.get_stats = fw1x_get_stats,
-#if NSYSMON_ENVSYS > 0
-	.get_temperature = NULL
-#endif
+// #if NSYSMON_ENVSYS > 0
+// 	.get_temperature = NULL
+// #endif
 };
 
 static const struct aq_firmware_ops aq_fw2x_ops = {
@@ -1587,9 +1587,9 @@ static const struct aq_firmware_ops aq_fw2x_ops = {
 	.set_mode = fw2x_set_mode,
 	.get_mode = fw2x_get_mode,
 	.get_stats = fw2x_get_stats,
-#if NSYSMON_ENVSYS > 0
-	.get_temperature = fw2x_get_temperature
-#endif
+// #if NSYSMON_ENVSYS > 0
+// 	.get_temperature = fw2x_get_temperature
+// #endif
 };
 
 static const struct aq_firmware_ops aq2_fw_ops = {
@@ -1598,9 +1598,9 @@ static const struct aq_firmware_ops aq2_fw_ops = {
 	.set_mode = aq2_fw_set_mode,
 	.get_mode = aq2_fw_get_mode,
 	.get_stats = aq2_fw_get_stats,
-#if NSYSMON_ENVSYS > 0
-	.get_temperature = aq2_fw_get_temperature
-#endif
+// #if NSYSMON_ENVSYS > 0
+// 	.get_temperature = aq2_fw_get_temperature
+// #endif
 };
 
 CFATTACH_DECL3_NEW(aq, sizeof(struct aq_softc),
@@ -1982,36 +1982,36 @@ aq_attach(device_t parent, device_t self, void *aux)
 	/* update media */
 	aq_ifmedia_change(ifp);
 
-#if NSYSMON_ENVSYS > 0
-	/* temperature monitoring */
-	if (sc->sc_fw_ops != NULL && sc->sc_fw_ops->get_temperature != NULL &&
-	    (((sc->sc_fw_caps & FW2X_CTRL_TEMPERATURE) != 0) ||
-	    HWTYPE_AQ2_P(sc))) {
-		sc->sc_sme = sysmon_envsys_create();
-		sc->sc_sme->sme_name = device_xname(self);
-		sc->sc_sme->sme_cookie = sc;
-		sc->sc_sme->sme_flags = 0;
-		sc->sc_sme->sme_refresh = aq_temp_refresh;
-		sc->sc_sensor_temp.units = ENVSYS_STEMP;
-		sc->sc_sensor_temp.state = ENVSYS_SINVALID;
-		snprintf(sc->sc_sensor_temp.desc, ENVSYS_DESCLEN, "PHY");
+// #if NSYSMON_ENVSYS > 0
+// 	/* temperature monitoring */
+// 	if (sc->sc_fw_ops != NULL && sc->sc_fw_ops->get_temperature != NULL &&
+// 	    (((sc->sc_fw_caps & FW2X_CTRL_TEMPERATURE) != 0) ||
+// 	    HWTYPE_AQ2_P(sc))) {
+// 		sc->sc_sme = sysmon_envsys_create();
+// 		sc->sc_sme->sme_name = device_xname(self);
+// 		sc->sc_sme->sme_cookie = sc;
+// 		sc->sc_sme->sme_flags = 0;
+// 		sc->sc_sme->sme_refresh = aq_temp_refresh;
+// 		sc->sc_sensor_temp.units = ENVSYS_STEMP;
+// 		sc->sc_sensor_temp.state = ENVSYS_SINVALID;
+// 		snprintf(sc->sc_sensor_temp.desc, ENVSYS_DESCLEN, "PHY");
 
-		sysmon_envsys_sensor_attach(sc->sc_sme, &sc->sc_sensor_temp);
-		if (sysmon_envsys_register(sc->sc_sme)) {
-			sysmon_envsys_destroy(sc->sc_sme);
-			sc->sc_sme = NULL;
-			aprint_debug_dev(sc->sc_dev, "failed to create envsys");
-			error = EINVAL;
-			goto attach_failure;
-		}
+// 		sysmon_envsys_sensor_attach(sc->sc_sme, &sc->sc_sensor_temp);
+// 		if (sysmon_envsys_register(sc->sc_sme)) {
+// 			sysmon_envsys_destroy(sc->sc_sme);
+// 			sc->sc_sme = NULL;
+// 			aprint_debug_dev(sc->sc_dev, "failed to create envsys");
+// 			error = EINVAL;
+// 			goto attach_failure;
+// 		}
 
-		/*
-		 * for unknown reasons, the first call of fw2x_get_temperature()
-		 * will always fail (firmware matter?), so run once now.
-		 */
-		aq_temp_refresh(sc->sc_sme, &sc->sc_sensor_temp);
-	}
-#endif
+// 		/*
+// 		 * for unknown reasons, the first call of fw2x_get_temperature()
+// 		 * will always fail (firmware matter?), so run once now.
+// 		 */
+// 		aq_temp_refresh(sc->sc_sme, &sc->sc_sensor_temp);
+// 	}
+// #endif
 
 #ifdef AQ_EVENT_COUNTERS
 	/* get starting statistics values */
@@ -2100,12 +2100,12 @@ aq_detach(device_t self, int flags __unused)
 		sc->sc_iosize = 0;
 	}
 
-#if NSYSMON_ENVSYS > 0
-	if (sc->sc_sme != NULL) {
-		/* all sensors associated with this will also be detached */
-		sysmon_envsys_unregister(sc->sc_sme);
-	}
-#endif
+// #if NSYSMON_ENVSYS > 0
+// 	if (sc->sc_sme != NULL) {
+// 		/* all sensors associated with this will also be detached */
+// 		sysmon_envsys_unregister(sc->sc_sme);
+// 	}
+// #endif
 
 #ifdef AQ_EVENT_COUNTERS
 	AQ_EVCNT_DETACH(sc, uprc);
@@ -3001,39 +3001,39 @@ fw2x_get_stats(struct aq_softc *sc, aq_hw_stats_s_t *stats)
 	return error;
 }
 
-#if NSYSMON_ENVSYS > 0
-static int
-fw2x_get_temperature(struct aq_softc *sc, uint32_t *temp)
-{
-	int error;
-	uint32_t value, celsius;
+// #if NSYSMON_ENVSYS > 0
+// static int
+// fw2x_get_temperature(struct aq_softc *sc, uint32_t *temp)
+// {
+// 	int error;
+// 	uint32_t value, celsius;
 
-	AQ_MPI_LOCK(sc);
+// 	AQ_MPI_LOCK(sc);
 
-	/* Say to F/W to update the temperature */
-	error = toggle_mpi_ctrl_and_wait(sc, FW2X_CTRL_TEMPERATURE, 1, 25);
-	if (error != 0)
-		goto failure;
+// 	/* Say to F/W to update the temperature */
+// 	error = toggle_mpi_ctrl_and_wait(sc, FW2X_CTRL_TEMPERATURE, 1, 25);
+// 	if (error != 0)
+// 		goto failure;
 
-	error = aq1_fw_downld_dwords(sc,
-	    sc->sc_mbox_addr + offsetof(fw2x_mailbox_t, phy_info2),
-	    &value, sizeof(value) / sizeof(uint32_t));
-	if (error != 0)
-		goto failure;
+// 	error = aq1_fw_downld_dwords(sc,
+// 	    sc->sc_mbox_addr + offsetof(fw2x_mailbox_t, phy_info2),
+// 	    &value, sizeof(value) / sizeof(uint32_t));
+// 	if (error != 0)
+// 		goto failure;
 
-	/* 1/256 decrees C to microkelvin */
-	celsius = __SHIFTOUT(value, PHYINFO2_TEMPERATURE);
-	if (celsius == 0) {
-		error = EIO;
-		goto failure;
-	}
-	*temp = celsius * (1000000 / 256) + 273150000;
+// 	/* 1/256 decrees C to microkelvin */
+// 	celsius = __SHIFTOUT(value, PHYINFO2_TEMPERATURE);
+// 	if (celsius == 0) {
+// 		error = EIO;
+// 		goto failure;
+// 	}
+// 	*temp = celsius * (1000000 / 256) + 273150000;
 
- failure:
-	AQ_MPI_UNLOCK(sc);
-	return 0;
-}
-#endif
+//  failure:
+// 	AQ_MPI_UNLOCK(sc);
+// 	return 0;
+// }
+// #endif
 
 static int
 aq1_fw_downld_dwords(struct aq_softc *sc, uint32_t addr, uint32_t *p,
@@ -3716,28 +3716,28 @@ aq2_fw_get_stats(struct aq_softc *sc, aq_hw_stats_s_t *stats)
 	return error;
 }
 
-#if NSYSMON_ENVSYS > 0
-static int
-aq2_fw_get_temperature(struct aq_softc *sc, uint32_t *temp)
-{
-	aq2_health_monitor_t health;
-	uint32_t data;
+// #if NSYSMON_ENVSYS > 0
+// static int
+// aq2_fw_get_temperature(struct aq_softc *sc, uint32_t *temp)
+// {
+// 	aq2_health_monitor_t health;
+// 	uint32_t data;
 
-	AQ_MPI_LOCK(sc);
+// 	AQ_MPI_LOCK(sc);
 
-	aq2_interface_buffer_read(sc, AQ2_FW_INTERFACE_OUT_PHY_HEALTH_MONITOR,
-	    (uint32_t *)&health, sizeof(health));
+// 	aq2_interface_buffer_read(sc, AQ2_FW_INTERFACE_OUT_PHY_HEALTH_MONITOR,
+// 	    (uint32_t *)&health, sizeof(health));
 
-	AQ_MPI_UNLOCK(sc);
+// 	AQ_MPI_UNLOCK(sc);
 
-	data = __SHIFTOUT(health.data1, HEALTH_MONITOR_DATA1_TEMPERATURE);
-	if (data == 0)
-		return EIO;
+// 	data = __SHIFTOUT(health.data1, HEALTH_MONITOR_DATA1_TEMPERATURE);
+// 	if (data == 0)
+// 		return EIO;
 
-	*temp = data * 1000000 + 273150000;
-	return 0;
-}
-#endif
+// 	*temp = data * 1000000 + 273150000;
+// 	return 0;
+// }
+// #endif
 
 static int
 aq2_get_mac_addr(struct aq_softc *sc)
@@ -4986,25 +4986,25 @@ aq_tx_pcq_free(struct aq_softc *sc, struct aq_txring *txring)
 	}
 }
 
-#if NSYSMON_ENVSYS > 0
-static void
-aq_temp_refresh(struct sysmon_envsys *sme, envsys_data_t *edata)
-{
-	struct aq_softc *sc;
-	uint32_t temp;
-	int error;
+// #if NSYSMON_ENVSYS > 0
+// static void
+// aq_temp_refresh(struct sysmon_envsys *sme, envsys_data_t *edata)
+// {
+// 	struct aq_softc *sc;
+// 	uint32_t temp;
+// 	int error;
 
-	sc = sme->sme_cookie;
+// 	sc = sme->sme_cookie;
 
-	error = sc->sc_fw_ops->get_temperature(sc, &temp);
-	if (error == 0) {
-		edata->value_cur = temp;
-		edata->state = ENVSYS_SVALID;
-	} else {
-		edata->state = ENVSYS_SINVALID;
-	}
-}
-#endif
+// 	error = sc->sc_fw_ops->get_temperature(sc, &temp);
+// 	if (error == 0) {
+// 		edata->value_cur = temp;
+// 		edata->state = ENVSYS_SVALID;
+// 	} else {
+// 		edata->state = ENVSYS_SINVALID;
+// 	}
+// }
+// #endif
 
 
 
