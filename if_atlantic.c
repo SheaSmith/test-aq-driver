@@ -88,7 +88,7 @@ __FBSDID("$FreeBSD$");
 #include <net/if.h>
 #include <net/if_dl.h>
 #include <net/if_media.h>
-#include <net/if_ether.h>
+#include <net/ethernet.h>
 #include <net/rss_config.h>
 
 #include <dev/pci/pcivar.h>
