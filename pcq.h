@@ -32,7 +32,7 @@
 // #ifndef _SYS_PCQ_H_
 // #define	_SYS_PCQ_H_
 
-#include <sys/kmem.h>
+#include <sys/malloc.h>
 
 typedef struct pcq pcq_t;
 
