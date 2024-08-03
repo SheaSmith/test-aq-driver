@@ -93,8 +93,36 @@ __FBSDID("$FreeBSD$");
 
 #include <dev/pci/pcivar.h>
 #include <dev/pci/pcireg.h>
-#include <dev/pci/pcidevs.h>
 #include <dev/sysmon/sysmonvar.h>
+
+/* Aquantia Corp. */
+#define	PCI_PRODUCT_AQUANTIA_AQC100	0x00b1		/* AQC100 10 Gigabit Network Adapter */
+#define	PCI_PRODUCT_AQUANTIA_AQC113DEV	0x00c0		/* AQC113DEV 10 Gigabit Network Adapter */
+#define	PCI_PRODUCT_AQUANTIA_AQC113	0x04c0		/* AQC113 10 Gigabit Network Adapter */
+#define	PCI_PRODUCT_AQUANTIA_AQC107	0x07b1		/* AQC107 10 Gigabit Network Adapter */
+#define	PCI_PRODUCT_AQUANTIA_AQC108	0x08b1		/* AQC108 5 Gigabit Network Adapter */
+#define	PCI_PRODUCT_AQUANTIA_AQC109	0x09b1		/* AQC109 2.5 Gigabit Network Adapter */
+#define	PCI_PRODUCT_AQUANTIA_AQC111	0x11b1		/* AQC111 5 Gigabit Network Adapter */
+#define	PCI_PRODUCT_AQUANTIA_AQC116C	0x11c0		/* AQC116C Gigabit Network Adapter */
+#define	PCI_PRODUCT_AQUANTIA_AQC112	0x12b1		/* AQC112 2.5 Gigabit Network Adapter */
+#define	PCI_PRODUCT_AQUANTIA_AQC115C	0x12c0		/* AQC115C 2.5 Gigabit Network Adapter */
+#define	PCI_PRODUCT_AQUANTIA_AQC113C	0x14c0		/* AQC113C 10 Gigabit Network Adapter */
+#define	PCI_PRODUCT_AQUANTIA_AQC113CA	0x34c0		/* AQC113CA 10 Gigabit Network Adapter */
+#define	PCI_PRODUCT_AQUANTIA_AQC100S	0x80b1		/* AQC100S 10 Gigabit Network Adapter */
+#define	PCI_PRODUCT_AQUANTIA_AQC107S	0x87b1		/* AQC107S 10 Gigabit Network Adapter */
+#define	PCI_PRODUCT_AQUANTIA_AQC108S	0x88b1		/* AQC108S 5 Gigabit Network Adapter */
+#define	PCI_PRODUCT_AQUANTIA_AQC109S	0x89b1		/* AQC109S 2.5 Gigabit Network Adapter */
+#define	PCI_PRODUCT_AQUANTIA_AQC111S	0x91b1		/* AQC111S 5 Gigabit Network Adapter */
+#define	PCI_PRODUCT_AQUANTIA_AQC112S	0x92b1		/* AQC112S 2.5 Gigabit Network Adapter */
+#define	PCI_PRODUCT_AQUANTIA_AQC114CS	0x93c0		/* AQC114CS 5 Gigabit Network Adapter */
+#define	PCI_PRODUCT_AQUANTIA_AQC113CS	0x94c0		/* AQC113CS 10 Gigabit Network Adapter */
+#define	PCI_PRODUCT_AQUANTIA_D100	0xd100		/* D100 10 Gigabit Network Adapter */
+#define	PCI_PRODUCT_AQUANTIA_D107	0xd107		/* D107 10 Gigabit Network Adapter */
+#define	PCI_PRODUCT_AQUANTIA_D108	0xd108		/* D108 5 Gigabit Network Adapter */
+#define	PCI_PRODUCT_AQUANTIA_D109	0xd109		/* D109 2.5 Gigabit Network Adapter */
+
+#define	PCI_VENDOR_AQUANTIA	0x1d6a		/* Aquantia */
+
 
 /* driver configuration */
 #define CONFIG_INTR_MODERATION_ENABLE	true	/* delayed interrupt */
