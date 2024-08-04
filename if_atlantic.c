@@ -958,7 +958,7 @@ struct aq_rxring {
 	int			 rx_q;
 	int			 rx_irq;
 
-	struct timeout		 rx_refill;
+	struct int		 rx_refill;
 	struct if_rxring	 rx_rxr;
 	uint32_t		 rx_prod;
 	uint32_t		 rx_cons;
@@ -1471,7 +1471,7 @@ aq_attach(struct device *parent, struct device *self, void *aux)
 		rx->rx_m_tail = &rx->rx_m_head;
 		rx->rx_m_error = 0;
 		ifp->if_iqs[i]->ifiq_softc = aq;
-		timeout_set(&rx->rx_refill, aq_refill, rx);
+		timeout(aq_refill, rx, &rx->rx_refill);
 
 		tx->tx_q = i;
 		tx->tx_ifq = ifp->if_ifqs[i];
@@ -3072,7 +3072,7 @@ aq_refill(void *xq)
 	aq_rx_fill(sc, &q->q_rx);
 
 	if (if_rxr_inuse(&q->q_rx.rx_rxr) == 0)
-		timeout_add(&q->q_rx.rx_refill, 1);
+		&q->q_rx.rx_refill += 1;
 }
 
 void
@@ -3189,7 +3189,7 @@ aq_rxeof(struct aq_softc *sc, struct aq_rxring *rx)
 
 		aq_rx_fill(sc, rx);
 		if (if_rxr_inuse(&rx->rx_rxr) == 0)
-			timeout_add(&rx->rx_refill, 1);
+			&rx->rx_refill += 1;
 	}
 }
 
