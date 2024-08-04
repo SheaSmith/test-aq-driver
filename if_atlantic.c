@@ -109,17 +109,32 @@
 
 
 #include <sys/param.h>
-#include <machine/param.h>
-#include <sys/kernel.h>
+#include <sys/malloc.h>
 #include <sys/socket.h>
+#include <sys/kernel.h>
+#include <sys/bus.h>
+#include <sys/module.h>
+#include <sys/rman.h>
+#include <sys/endian.h>
+#include <sys/sockio.h>
+#include <sys/priv.h>
+#include <sys/sysctl.h>
+#include <sys/sbuf.h>
 #include <sys/bitstring.h>
+
+#include <machine/bus.h>
+#include <machine/resource.h>
+
+#include <dev/pci/pcireg.h>
+#include <dev/pci/pcivar.h>
+
 #include <net/if.h>
 #include <net/if_media.h>
 #include <net/if_var.h>
 #include <net/if_dl.h>
 #include <net/ethernet.h>
-// #include <net/iflib.h>
-#include <netinet/in.h>
+#include <net/iflib.h>
+#include <net/rss_config.h>
 // #endif
 
 /* #define AQ_DEBUG 1 */
