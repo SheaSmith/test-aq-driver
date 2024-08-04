@@ -78,7 +78,7 @@
  * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
  */
-#include "bpfilter.h"
+// #include "bpfilter.h"
 #include "vlan.h"
 
 #include <sys/types.h>
@@ -103,9 +103,9 @@
 #include <dev/pci/pcivar.h>
 #include <dev/pci/pcidevs.h>
 
-#if NBPFILTER > 0
+// #if NBPFILTER > 0
 #include <net/bpf.h>
-#endif
+// #endif
 
 /* #define AQ_DEBUG 1 */
 #ifdef AQ_DEBUG
@@ -3254,10 +3254,10 @@ aq_start(struct ifqueue *ifq)
 
 		as->as_m = m;
 
-#if NBPFILTER > 0
-		if (ifq->ifq_if->if_bpf)
-			bpf_mtap_ether(ifq->ifq_if->if_bpf, m, BPF_DIRECTION_OUT);
-#endif
+// #if NBPFILTER > 0
+// 		if (ifq->ifq_if->if_bpf)
+// 			bpf_mtap_ether(ifq->ifq_if->if_bpf, m, BPF_DIRECTION_OUT);
+// #endif
 		bus_dmamap_sync(sc->sc_dmat, as->as_map, 0,
 		    as->as_map->dm_mapsize, BUS_DMASYNC_PREWRITE);
 
