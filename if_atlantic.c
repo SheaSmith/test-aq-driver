@@ -105,6 +105,8 @@
 
 // #if NBPFILTER > 0
 #include <net/bpf.h>
+
+#include <sys/bus_dma.h>
 // #endif
 
 /* #define AQ_DEBUG 1 */
