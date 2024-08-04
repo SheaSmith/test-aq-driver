@@ -86,7 +86,7 @@
 #include <sys/param.h>
 #include <sys/sockio.h>
 #include <sys/systm.h>
-#include <sys/intrmap.h>
+// #include <sys/intrmap.h>
 
 #include <net/if.h>
 #include <net/if_media.h>
@@ -970,7 +970,7 @@ struct aq_softc {
 	pcitag_t		sc_pcitag;
 	int			sc_nqueues;
 	struct aq_queues	sc_queues[AQ_MAXQ];
-	struct intrmap		*sc_intrmap;
+	// struct intrmap		*sc_intrmap;
 	void			*sc_ih;
 	bus_space_handle_t	sc_ioh;
 	bus_space_tag_t		sc_iot;
@@ -1281,18 +1281,18 @@ aq_attach(struct device *parent, struct device *self, void *aux)
 	if (pci_intr_map_msix(pa, 0, &ih) == 0) {
 		int nmsix = pci_intr_msix_count(pa);
 		/* don't do rss on aq2 yet */
-		if (aqp->aq_hwtype == HWTYPE_AQ1 && nmsix > 1) {
-			nmsix--;
-			sc->sc_intrmap = intrmap_create(&sc->sc_dev,
-			    nmsix, AQ_MAXQ, INTRMAP_POWEROF2);
-			sc->sc_nqueues = intrmap_count(sc->sc_intrmap);
-			KASSERT(sc->sc_nqueues > 0);
-			KASSERT(powerof2(sc->sc_nqueues));
+		// if (aqp->aq_hwtype == HWTYPE_AQ1 && nmsix > 1) {
+		// 	nmsix--;
+		// 	sc->sc_intrmap = intrmap_create(&sc->sc_dev,
+		// 	    nmsix, AQ_MAXQ, INTRMAP_POWEROF2);
+		// 	sc->sc_nqueues = intrmap_count(sc->sc_intrmap);
+		// 	KASSERT(sc->sc_nqueues > 0);
+		// 	KASSERT(powerof2(sc->sc_nqueues));
 
-			sc->sc_linkstat_irq = 0;
-			isr = aq_intr_link;
-			irqnum++;
-		}
+		// 	sc->sc_linkstat_irq = 0;
+		// 	isr = aq_intr_link;
+		// 	irqnum++;
+		// }
 		irqmode = AQ_INTR_CTRL_IRQMODE_MSIX;
 	} else if (pci_intr_map_msi(pa, &ih) == 0) {
 		irqmode = AQ_INTR_CTRL_IRQMODE_MSI;
@@ -1443,22 +1443,22 @@ aq_attach(struct device *parent, struct device *self, void *aux)
 		    "atlantic", i);
 
 		if (sc->sc_nqueues > 1) {
-			if (pci_intr_map_msix(pa, irqnum, &ih)) {
-				printf(": unable to map msi-x vector %d\n",
-				    irqnum);
-				return;
-			}
+			// if (pci_intr_map_msix(pa, irqnum, &ih)) {
+			// 	printf(": unable to map msi-x vector %d\n",
+			// 	    irqnum);
+			// 	return;
+			// }
 
-			aq->q_ihc = pci_intr_establish_cpu(sc->sc_pc, ih,
-			    IPL_NET | IPL_MPSAFE, intrmap_cpu(sc->sc_intrmap, i),
-			    aq_intr_queue, aq, aq->q_name);
-			if (aq->q_ihc == NULL) {
-				printf(": unable to establish interrupt %d\n",
-				    irqnum);
-				return;
-			}
-			rx->rx_irq = irqnum;
-			tx->tx_irq = irqnum;
+			// aq->q_ihc = pci_intr_establish_cpu(sc->sc_pc, ih,
+			//     IPL_NET | IPL_MPSAFE, intrmap_cpu(sc->sc_intrmap, i),
+			//     aq_intr_queue, aq, aq->q_name);
+			// if (aq->q_ihc == NULL) {
+			// 	printf(": unable to establish interrupt %d\n",
+			// 	    irqnum);
+			// 	return;
+			// }
+			// rx->rx_irq = irqnum;
+			// tx->tx_irq = irqnum;
 			irqnum++;
 		} else {
 			rx->rx_irq = irqnum++;
