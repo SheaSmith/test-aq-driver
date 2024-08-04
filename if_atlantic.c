@@ -138,6 +138,11 @@ __FBSDID("$FreeBSD$");
 #include <net/ethernet.h>
 #include <net/iflib.h>
 #include <net/rss_config.h>
+
+
+#include	<sys/param.h>
+       #include	<sys/lock.h>
+       #include	<sys/mutex.h>
 // #endif
 
 /* #define AQ_DEBUG 1 */
