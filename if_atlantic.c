@@ -79,7 +79,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 // #include "bpfilter.h"
-#include "vlan.h"
+// #include "vlan.h"
 
 #include <sys/types.h>
 #include <sys/device.h>
@@ -1358,9 +1358,9 @@ aq_attach(struct device *parent, struct device *self, void *aux)
 	ifp->if_capabilities = IFCAP_VLAN_MTU | IFCAP_CSUM_IPv4 |
 	    IFCAP_CSUM_UDPv4 | IFCAP_CSUM_UDPv6 | IFCAP_CSUM_TCPv4 |
 	    IFCAP_CSUM_TCPv6;
-#if NVLAN > 0
+// #if NVLAN > 0
 	ifp->if_capabilities |= IFCAP_VLAN_HWTAGGING;
-#endif
+// #endif
 	ifq_init_maxlen(&ifp->if_snd, AQ_TXD_NUM);
 
 	ifmedia_init(&sc->sc_media, IFM_IMASK, aq_ifmedia_change,
@@ -2933,11 +2933,11 @@ aq_rxring_reset(struct aq_softc *sc, struct aq_rxring *rx, int start)
 	AQ_WRITE_REG_BIT(sc, RX_DMA_DESC_REG(rx->rx_q),
 	    RX_DMA_DESC_HEADER_SPLIT, 0);
 
-#if NVLAN > 0
+// #if NVLAN > 0
 	strip = 1;
-#else
-	strip = 0;
-#endif
+// #else
+	// strip = 0;
+// #endif
 	AQ_WRITE_REG_BIT(sc, RX_DMA_DESC_REG(rx->rx_q),
 	    RX_DMA_DESC_VLAN_STRIP, strip);
 
@@ -3095,12 +3095,12 @@ aq_rxeof(struct aq_softc *sc, struct aq_rxring *rx)
 
 		m = rx->rx_m_head;
 
-#if NVLAN > 0
+// #if NVLAN > 0
 		if (rxd_type & (AQ_RXDESC_TYPE_VLAN | AQ_RXDESC_TYPE_VLAN2)) {
 			m->m_pkthdr.ether_vtag = lemtoh16(&rxd->vlan);
 			m->m_flags |= M_VLANTAG;
 		}
-#endif
+// #endif
 
 		if ((rxd_type & AQ_RXDESC_TYPE_V4_SUM) &&
 		    ((status & AQ_RXDESC_STATUS_V4_SUM_NG) == 0))
@@ -3263,7 +3263,7 @@ aq_start(struct ifqueue *ifq)
 
 		ctl2 = m->m_pkthdr.len << AQ_TXDESC_CTL2_LEN_SHIFT;
 		ctl1 = AQ_TXDESC_CTL1_TYPE_TXD | AQ_TXDESC_CTL1_CMD_FCS;
-#if NVLAN > 0
+// #if NVLAN > 0
 		if (m->m_flags & M_VLANTAG) {
 			txd = ring + idx;
 			txd->buf_addr = 0;
@@ -3279,7 +3279,7 @@ aq_start(struct ifqueue *ifq)
 				idx = 0;
 			used++;
 		}
-#endif
+// #endif
 
 		if (m->m_pkthdr.csum_flags & M_IPV4_CSUM_OUT)
 			ctl1 |= AQ_TXDESC_CTL1_CMD_IP4CSUM;
