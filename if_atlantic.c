@@ -82,7 +82,7 @@
 // #include "vlan.h"
 
 #include <sys/types.h>
-#include <sys/device.h>
+// #include <sys/device.h>
 #include <sys/param.h>
 #include <sys/sockio.h>
 #include <sys/systm.h>
@@ -113,8 +113,6 @@
 #else
 #define DPRINTF(x)
 #endif /* AQ_DEBUG */
-
-#define DEVNAME(_s)	((_s)->sc_dev.dv_xname)
 
 #define AQ_BAR0 				0x10
 #define AQ_MAXQ 				8
@@ -964,7 +962,7 @@ struct aq_firmware_ops {
 };
 
 struct aq_softc {
-	struct device		sc_dev;
+	struct device_t		sc_dev;
 	uint16_t		sc_product;
 	uint16_t		sc_revision;
 	bus_dma_tag_t		sc_dmat;
@@ -1442,7 +1440,7 @@ aq_attach(struct device *parent, struct device *self, void *aux)
 		ifp->if_ifqs[i]->ifq_softc = aq;
 
 		snprintf(aq->q_name, sizeof(aq->q_name), "%s:%u",
-		    DEVNAME(sc), i);
+		    "atlantic", i);
 
 		if (sc->sc_nqueues > 1) {
 			if (pci_intr_map_msix(pa, irqnum, &ih)) {
@@ -1541,27 +1539,27 @@ aq1_fw_reboot(struct aq_softc *sc)
 
 	error = aq1_mac_soft_reset(sc, &mode);
 	if (error != 0) {
-		printf("%s: MAC reset failed: %d\n", DEVNAME(sc), error);
+		printf("%s: MAC reset failed: %d\n", "atlantic", error);
 		return error;
 	}
 
 	switch (mode) {
 	case FW_BOOT_MODE_FLB:
 		DPRINTF(("%s: FLB> F/W successfully loaded from flash.",
-		    DEVNAME(sc)));
+		    "atlantic"));
 		sc->sc_flash_present = 1;
 		break;
 	case FW_BOOT_MODE_RBL_FLASH:
 		DPRINTF(("%s: RBL> F/W loaded from flash. Host Bootload "
-		    "disabled.", DEVNAME(sc)));
+		    "disabled.", "atlantic"));
 		sc->sc_flash_present = 1;
 		break;
 	case FW_BOOT_MODE_UNKNOWN:
 		printf("%s: F/W bootload error: unknown bootloader type",
-		    DEVNAME(sc));
+		    "atlantic");
 		return ENOTSUP;
 	case FW_BOOT_MODE_RBL_HOST_BOOTLOAD:
-		printf("%s: RBL> F/W Host Bootload not implemented", DEVNAME(sc));
+		printf("%s: RBL> F/W Host Bootload not implemented", "atlantic");
 		return ENOTSUP;
 	}
 
@@ -1582,7 +1580,7 @@ aq1_mac_soft_reset_rbl(struct aq_softc *sc, enum aq_fw_bootloader_mode *mode)
 {
 	int timo;
 
-	DPRINTF(("%s: RBL> MAC reset STARTED!\n", DEVNAME(sc)));
+	DPRINTF(("%s: RBL> MAC reset STARTED!\n", "atlantic"));
 
 	AQ_WRITE_REG(sc, AQ_FW_GLB_CTL2_REG, 0x40e1);
 	AQ_WRITE_REG(sc, AQ_FW_GLB_CPU_SEM_REG(0), 1);
@@ -1606,7 +1604,7 @@ aq1_mac_soft_reset_rbl(struct aq_softc *sc, enum aq_fw_bootloader_mode *mode)
 	}
 
 	if (timo <= 0) {
-		printf("%s: RBL> RBL restart failed: timeout\n", DEVNAME(sc));
+		printf("%s: RBL> RBL restart failed: timeout\n", "atlantic");
 		return EBUSY;
 	}
 
@@ -1614,17 +1612,17 @@ aq1_mac_soft_reset_rbl(struct aq_softc *sc, enum aq_fw_bootloader_mode *mode)
 	case RBL_STATUS_SUCCESS:
 		if (mode != NULL)
 			*mode = FW_BOOT_MODE_RBL_FLASH;
-		DPRINTF(("%s: RBL> reset complete! [Flash]\n", DEVNAME(sc)));
+		DPRINTF(("%s: RBL> reset complete! [Flash]\n", "atlantic"));
 		break;
 	case RBL_STATUS_HOST_BOOT:
 		if (mode != NULL)
 			*mode = FW_BOOT_MODE_RBL_HOST_BOOTLOAD;
 		DPRINTF(("%s: RBL> reset complete! [Host Bootload]\n",
-		    DEVNAME(sc)));
+		    "atlantic"));
 		break;
 	case RBL_STATUS_FAILURE:
 	default:
-		printf("%s: unknown RBL status 0x%x\n", DEVNAME(sc),
+		printf("%s: unknown RBL status 0x%x\n", "atlantic",
 		    rbl_status);
 		return EBUSY;
 	}
@@ -1686,10 +1684,10 @@ aq1_mac_soft_reset_flb(struct aq_softc *sc)
 		}
 		if (flb_status == 0) {
 			printf("%s: FLB> MAC kickstart failed: timed out\n",
-			    DEVNAME(sc));
+			    "atlantic");
 			return ETIMEDOUT;
 		}
-		DPRINTF(("%s: FLB> MAC kickstart done, %d ms\n", DEVNAME(sc),
+		DPRINTF(("%s: FLB> MAC kickstart done, %d ms\n", "atlantic",
 		    timo));
 		/* FW reset */
 		AQ_WRITE_REG(sc, AQ_FW_GLB_CTL2_REG, 0x80e0);
@@ -1711,10 +1709,10 @@ aq1_mac_soft_reset_flb(struct aq_softc *sc)
 		delay(10000);
 	}
 	if (timo >= 1000) {
-		printf("%s: FLB> Global Soft Reset failed\n", DEVNAME(sc));
+		printf("%s: FLB> Global Soft Reset failed\n", "atlantic");
 		return ETIMEDOUT;
 	}
-	DPRINTF(("%s: FLB> F/W restart: %d ms\n", DEVNAME(sc), timo * 10));
+	DPRINTF(("%s: FLB> F/W restart: %d ms\n", "atlantic", timo * 10));
 
 	return 0;
 
@@ -1838,7 +1836,7 @@ aq1_hw_init_ucp(struct aq_softc *sc)
 	if (sc->sc_fw_version < AQ_FW_MIN_VERSION) {
 		printf("%s: atlantic: wrong FW version: " AQ_FW_MIN_VERSION_STR
 		    " or later required, this is %d.%d.%d\n",
-		    DEVNAME(sc),
+		    "atlantic",
 		    FW_VERSION_MAJOR(sc),
 		    FW_VERSION_MINOR(sc),
 		    FW_VERSION_BUILD(sc));
@@ -1846,7 +1844,7 @@ aq1_hw_init_ucp(struct aq_softc *sc)
 	}
 
 	if (sc->sc_mbox_addr == 0)
-		printf("%s: NULL MBOX!!\n", DEVNAME(sc));
+		printf("%s: NULL MBOX!!\n", "atlantic");
 
 	return 0;
 }
@@ -1878,7 +1876,7 @@ aq2_interface_buffer_read(struct aq_softc *sc, uint32_t reg0, uint32_t *data0,
 			break;
 	}
 	if (timo == 0) {
-		printf("%s: interface buffer read timeout\n", DEVNAME(sc));
+		printf("%s: interface buffer read timeout\n", "atlantic");
 		return ETIMEDOUT;
 	}
 	return 0;
@@ -1981,7 +1979,7 @@ aq2_fw_reboot(struct aq_softc *sc)
 
 	/* debug info */
 	v = AQ_READ_REG(sc, AQ_HW_REVISION_REG);
-	DPRINTF(("%s: HW Rev: 0x%08x\n", DEVNAME(sc), v));
+	DPRINTF(("%s: HW Rev: 0x%08x\n", "atlantic", v));
 
 	return 0;
 }
@@ -2027,7 +2025,7 @@ aq1_get_mac_addr(struct aq_softc *sc)
 		return ENXIO;
 	}
 
-	DPRINTF(("%s: efuse_shadow_addr = %x\n", DEVNAME(sc), efuse_shadow_addr));
+	DPRINTF(("%s: efuse_shadow_addr = %x\n", "atlantic", efuse_shadow_addr));
 
 	memset(mac_addr, 0, sizeof(mac_addr));
 	err = aq1_fw_downld_dwords(sc, efuse_shadow_addr + (40 * 4),
@@ -2040,13 +2038,13 @@ aq1_get_mac_addr(struct aq_softc *sc)
 		return ENXIO;
 	}
 
-	DPRINTF(("%s: mac0 %x mac1 %x\n", DEVNAME(sc), mac_addr[0],
+	DPRINTF(("%s: mac0 %x mac1 %x\n", "atlantic", mac_addr[0],
 	    mac_addr[1]));
 
 	mac_addr[0] = htobe32(mac_addr[0]);
 	mac_addr[1] = htobe32(mac_addr[1]);
 
-	DPRINTF(("%s: mac0 %x mac1 %x\n", DEVNAME(sc), mac_addr[0],
+	DPRINTF(("%s: mac0 %x mac1 %x\n", "atlantic", mac_addr[0],
 	    mac_addr[1]));
 
 	memcpy(sc->sc_enaddr.ether_addr_octet,
@@ -2074,7 +2072,7 @@ aq1_fw_downld_dwords(struct aq_softc *sc, uint32_t addr, uint32_t *p,
 		v = AQ_READ_REG(sc, AQ_FW_SEM_RAM_REG);
 		if (v == 0) {
 			printf("%s: %s:%d: timeout\n",
-			    DEVNAME(sc), __func__, __LINE__);
+			    "atlantic", __func__, __LINE__);
 			return ETIMEDOUT;
 		}
 	}
@@ -2101,7 +2099,7 @@ aq1_fw_downld_dwords(struct aq_softc *sc, uint32_t addr, uint32_t *p,
 
 	if (error != 0)
 		printf("%s: %s:%d: timeout\n",
-		    DEVNAME(sc), __func__, __LINE__);
+		    "atlantic", __func__, __LINE__);
 
 	return error;
 }
@@ -2117,12 +2115,12 @@ aq_fw2x_reset(struct aq_softc *sc)
 	    (uint32_t *)&caps, sizeof caps / sizeof(uint32_t));
 	if (error != 0) {
 		printf("%s: fw2x> can't get F/W capabilities mask, error %d\n",
-		    DEVNAME(sc), error);
+		    "atlantic", error);
 		return error;
 	}
 	sc->sc_fw_caps = caps.caps_lo | ((uint64_t)caps.caps_hi << 32);
 
-	DPRINTF(("%s: fw2x> F/W capabilities=0x%llx\n", DEVNAME(sc),
+	DPRINTF(("%s: fw2x> F/W capabilities=0x%llx\n", "atlantic",
 	    sc->sc_fw_caps));
 
 	return 0;
@@ -2131,7 +2129,7 @@ aq_fw2x_reset(struct aq_softc *sc)
 int
 aq_fw1x_reset(struct aq_softc *sc)
 {
-	printf("%s: unimplemented %s\n", DEVNAME(sc), __func__);
+	printf("%s: unimplemented %s\n", "atlantic", __func__);
 	return 0;
 }
 
@@ -2732,7 +2730,7 @@ aq_fw2x_set_mode(struct aq_softc *sc, enum aq_hw_fw_mpi_state mode,
 		mpi_ctrl &= ~(FW2X_CTRL_PAUSE | FW2X_CTRL_ASYMMETRIC_PAUSE);
 		break;
 	default:
-		printf("%s: fw2x> unknown MPI state %d\n", DEVNAME(sc), mode);
+		printf("%s: fw2x> unknown MPI state %d\n", "atlantic", mode);
 		error =  EINVAL;
 		goto failure;
 	}
@@ -3114,7 +3112,7 @@ aq_rxeof(struct aq_softc *sc, struct aq_rxring *rx)
 		if ((status & AQ_RXDESC_STATUS_MACERR) ||
 		    (rxd_type & AQ_RXDESC_TYPE_DMA_ERR)) {
 			printf("%s:rx: rx error (status %x type %x)\n",
-			    DEVNAME(sc), status, rxd_type);
+			    "atlantic", status, rxd_type);
 			rx->rx_m_error = 1;
 		}
 
@@ -3417,7 +3415,7 @@ aq_queue_up(struct aq_softc *sc, struct aq_queues *aq)
 	rx->rx_slots = mallocarray(sizeof(*as), AQ_RXD_NUM, M_DEVBUF,
 	    M_WAITOK | M_ZERO);
 	if (rx->rx_slots == NULL) {
-		printf("%s: failed to allocate rx slots %d\n", DEVNAME(sc),
+		printf("%s: failed to allocate rx slots %d\n", "atlantic",
 		    aq->q_index);
 		return ENOMEM;
 	}
@@ -3428,14 +3426,14 @@ aq_queue_up(struct aq_softc *sc, struct aq_queues *aq)
 		    BUS_DMA_WAITOK | BUS_DMA_ALLOCNOW | BUS_DMA_64BIT,
 		    &as->as_map) != 0) {
 			printf("%s: failed to allocate rx dma maps %d\n",
-			    DEVNAME(sc), aq->q_index);
+			    "atlantic", aq->q_index);
 			goto destroy_rx_slots;
 		}
 	}
 
 	if (aq_dmamem_alloc(sc, &rx->rx_mem, AQ_RXD_NUM *
 	    sizeof(struct aq_rx_desc_read), PAGE_SIZE) != 0) {
-		printf("%s: unable to allocate rx ring %d\n", DEVNAME(sc),
+		printf("%s: unable to allocate rx ring %d\n", "atlantic",
 		    aq->q_index);
 		goto destroy_rx_slots;
 	}
@@ -3444,7 +3442,7 @@ aq_queue_up(struct aq_softc *sc, struct aq_queues *aq)
 	tx->tx_slots = mallocarray(sizeof(*as), AQ_TXD_NUM, M_DEVBUF,
 	    M_WAITOK | M_ZERO);
 	if (tx->tx_slots == NULL) {
-		printf("%s: failed to allocate tx slots %d\n", DEVNAME(sc),
+		printf("%s: failed to allocate tx slots %d\n", "atlantic",
 		    aq->q_index);
 		goto destroy_rx_ring;
 	}
@@ -3456,14 +3454,14 @@ aq_queue_up(struct aq_softc *sc, struct aq_queues *aq)
 		    MCLBYTES, 0, BUS_DMA_WAITOK | BUS_DMA_ALLOCNOW | BUS_DMA_64BIT,
 		    &as->as_map) != 0) {
 			printf("%s: failed to allocated tx dma maps %d\n",
-			    DEVNAME(sc), aq->q_index);
+			    "atlantic", aq->q_index);
 			goto destroy_tx_slots;
 		}
 	}
 
 	if (aq_dmamem_alloc(sc, &tx->tx_mem, AQ_TXD_NUM *
 	    sizeof(struct aq_tx_desc), PAGE_SIZE) != 0) {
-		printf("%s: unable to allocate tx ring %d\n", DEVNAME(sc),
+		printf("%s: unable to allocate tx ring %d\n", "atlantic",
 		    aq->q_index);
 		goto destroy_tx_slots;
 	}
@@ -3823,7 +3821,7 @@ aq2_filter_art_set(struct aq_softc *sc, uint32_t idx,
 
 	WAIT_FOR(AQ_READ_REG(sc, AQ2_ART_SEM_REG) == 1, 10, 1000, &error);
 	if (error != 0) {
-		printf("%s: AQ2_ART_SEM_REG timeout\n", DEVNAME(sc));
+		printf("%s: AQ2_ART_SEM_REG timeout\n", "atlantic");
 		goto out;
 	}
 
