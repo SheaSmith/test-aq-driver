@@ -691,8 +691,8 @@ __FBSDID("$FreeBSD$");
 #define HWTYPE_AQ2_P(sc)	(((sc)->sc_features & FEATURES_AQ2) != 0)
 
 /* lock for firmware interface */
-#define AQ_MPI_LOCK(sc)		mtx_enter(&(sc)->sc_mpi_mutex);
-#define AQ_MPI_UNLOCK(sc)	mtx_leave(&(sc)->sc_mpi_mutex);
+#define AQ_MPI_LOCK(sc)		mtx_lock(&(sc)->sc_mpi_mutex);
+#define AQ_MPI_UNLOCK(sc)	mtx_unlock(&(sc)->sc_mpi_mutex);
 
 #define FW2X_CTRL_10BASET_HD			(1 << 0)
 #define FW2X_CTRL_10BASET_FD			(1 << 1)
@@ -1029,7 +1029,7 @@ struct aq_softc {
 	struct ifmedia		sc_media;
 
 	struct ether_addr	sc_enaddr;
-	struct mutex		sc_mpi_mutex;
+	struct mtx		sc_mpi_mutex;
 };
 
 const struct pci_matchid aq_devices[] = {
