@@ -1,4 +1,22 @@
-/*	$NetBSD: if_aq.c,v 1.49 2024/07/05 04:31:51 rin Exp $	*/
+/* $OpenBSD: if_aq_pci.c,v 1.28 2024/05/24 06:02:53 jsg Exp $ */
+/*	$NetBSD: if_aq.c,v 1.27 2021/06/16 00:21:18 riastradh Exp $	*/
+
+/*
+ * Copyright (c) 2021 Jonathan Matthew <jonathan@d14n.org>
+ * Copyright (c) 2021 Mike Larkin <mlarkin@openbsd.org>
+ *
+ * Permission to use, copy, modify, and distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ */
 
 /**
  * aQuantia Corporation Network Driver
@@ -36,7 +54,7 @@
  */
 
 /*-
- * Copyright (c) 2020 Ryo Shimizu
+ * Copyright (c) 2020 Ryo Shimizu <ryo@nerv.org>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -60,561 +78,378 @@
  * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
  */
+#include "bpfilter.h"
+#include "vlan.h"
 
-#include <sys/cdefs.h>
-__FBSDID("$FreeBSD$");
-
-// #ifdef _KERNEL_OPT
-// #include "opt_if_aq.h"
-// #include "sysmon_envsys.h"
-// #endif
-
-#include <sys/param.h>
 #include <sys/types.h>
-#include "bitops.h"
-// #include <sys/cprng.h>
-
-#include <unistd.h>
-#include <sys/endian.h>
+#include <sys/device.h>
+#include <sys/param.h>
+#include <sys/sockio.h>
 #include <sys/systm.h>
-#include <machine/cpu.h>
-#include <sys/socket.h>
+#include <sys/intrmap.h>
 
-// #include <sys/interrupt.h>
-#include <sys/module.h>
-#include "pcq.h"
-
-#include <net/bpf.h>
 #include <net/if.h>
-#include <net/if_dl.h>
 #include <net/if_media.h>
-#include <net/ethernet.h>
-#include <net/rss_config.h>
+#include <net/toeplitz.h>
 
-#include <dev/pci/pcivar.h>
+#include <netinet/in.h>
+#include <netinet/if_ether.h>
+
+#ifdef __HAVE_FDT
+#include <dev/ofw/openfirm.h>
+#endif
+
 #include <dev/pci/pcireg.h>
-// #include <dev/sysmon/sysmonvar.h>
+#include <dev/pci/pcivar.h>
+#include <dev/pci/pcidevs.h>
 
-/* Aquantia Corp. */
-#define	PCI_PRODUCT_AQUANTIA_AQC100	0x00b1		/* AQC100 10 Gigabit Network Adapter */
-#define	PCI_PRODUCT_AQUANTIA_AQC113DEV	0x00c0		/* AQC113DEV 10 Gigabit Network Adapter */
-#define	PCI_PRODUCT_AQUANTIA_AQC113	0x04c0		/* AQC113 10 Gigabit Network Adapter */
-#define	PCI_PRODUCT_AQUANTIA_AQC107	0x07b1		/* AQC107 10 Gigabit Network Adapter */
-#define	PCI_PRODUCT_AQUANTIA_AQC108	0x08b1		/* AQC108 5 Gigabit Network Adapter */
-#define	PCI_PRODUCT_AQUANTIA_AQC109	0x09b1		/* AQC109 2.5 Gigabit Network Adapter */
-#define	PCI_PRODUCT_AQUANTIA_AQC111	0x11b1		/* AQC111 5 Gigabit Network Adapter */
-#define	PCI_PRODUCT_AQUANTIA_AQC116C	0x11c0		/* AQC116C Gigabit Network Adapter */
-#define	PCI_PRODUCT_AQUANTIA_AQC112	0x12b1		/* AQC112 2.5 Gigabit Network Adapter */
-#define	PCI_PRODUCT_AQUANTIA_AQC115C	0x12c0		/* AQC115C 2.5 Gigabit Network Adapter */
-#define	PCI_PRODUCT_AQUANTIA_AQC113C	0x14c0		/* AQC113C 10 Gigabit Network Adapter */
-#define	PCI_PRODUCT_AQUANTIA_AQC113CA	0x34c0		/* AQC113CA 10 Gigabit Network Adapter */
-#define	PCI_PRODUCT_AQUANTIA_AQC100S	0x80b1		/* AQC100S 10 Gigabit Network Adapter */
-#define	PCI_PRODUCT_AQUANTIA_AQC107S	0x87b1		/* AQC107S 10 Gigabit Network Adapter */
-#define	PCI_PRODUCT_AQUANTIA_AQC108S	0x88b1		/* AQC108S 5 Gigabit Network Adapter */
-#define	PCI_PRODUCT_AQUANTIA_AQC109S	0x89b1		/* AQC109S 2.5 Gigabit Network Adapter */
-#define	PCI_PRODUCT_AQUANTIA_AQC111S	0x91b1		/* AQC111S 5 Gigabit Network Adapter */
-#define	PCI_PRODUCT_AQUANTIA_AQC112S	0x92b1		/* AQC112S 2.5 Gigabit Network Adapter */
-#define	PCI_PRODUCT_AQUANTIA_AQC114CS	0x93c0		/* AQC114CS 5 Gigabit Network Adapter */
-#define	PCI_PRODUCT_AQUANTIA_AQC113CS	0x94c0		/* AQC113CS 10 Gigabit Network Adapter */
-#define	PCI_PRODUCT_AQUANTIA_D100	0xd100		/* D100 10 Gigabit Network Adapter */
-#define	PCI_PRODUCT_AQUANTIA_D107	0xd107		/* D107 10 Gigabit Network Adapter */
-#define	PCI_PRODUCT_AQUANTIA_D108	0xd108		/* D108 5 Gigabit Network Adapter */
-#define	PCI_PRODUCT_AQUANTIA_D109	0xd109		/* D109 2.5 Gigabit Network Adapter */
+#if NBPFILTER > 0
+#include <net/bpf.h>
+#endif
 
-#define	PCI_VENDOR_AQUANTIA	0x1d6a		/* Aquantia */
+/* #define AQ_DEBUG 1 */
+#ifdef AQ_DEBUG
+#define DPRINTF(x) printf x
+#else
+#define DPRINTF(x)
+#endif /* AQ_DEBUG */
 
+#define DEVNAME(_s)	((_s)->sc_dev.dv_xname)
 
-/* driver configuration */
-#define CONFIG_INTR_MODERATION_ENABLE	true	/* delayed interrupt */
-#undef CONFIG_LRO_SUPPORT			/* no LRO not supported */
-#undef CONFIG_NO_TXRX_INDEPENDENT		/* share TX/RX interrupts */
+#define AQ_BAR0 				0x10
+#define AQ_MAXQ 				8
+#define AQ_RSS_KEYSIZE				40
+#define AQ_RSS_REDIR_ENTRIES			12
 
-#define AQ_NINTR_MAX			(AQ_RSSQUEUE_MAX + AQ_RSSQUEUE_MAX + 1)
-					/* TX + RX + LINK. must be <= 32 */
-#define AQ_LINKSTAT_IRQ			31	/* for legacy mode */
+#define AQ_TXD_NUM 				2048
+#define AQ_RXD_NUM 				2048
 
-#define AQ_TXD_NUM			2048	/* per ring. 8*n && 32~8184 */
-#define AQ_RXD_NUM			2048	/* per ring. 8*n && 32~8184 */
-/* minimum required to send a packet (vlan needs additional TX descriptor) */
-#define AQ_TXD_MIN			(1 + 1)
+#define AQ_TX_MAX_SEGMENTS			32
 
+#define AQ_LINKSTAT_IRQ				31
 
-/* hardware specification */
-#define AQ_RINGS_NUM			32
-#define AQ_RSSQUEUE_MAX			8
-#define AQ_RX_DESCRIPTOR_MIN		32
-#define AQ_TX_DESCRIPTOR_MIN		32
-#define AQ_RX_DESCRIPTOR_MAX		8184
-#define AQ_TX_DESCRIPTOR_MAX		8184
-#define AQ_TRAFFICCLASS_NUM		8
-#define AQ_RSS_HASHKEY_SIZE		40
-#define AQ_RSS_INDIRECTION_TABLE_MAX	64
+#define RPF_ACTION_HOST				1
 
-#define AQ1_JUMBO_MTU_REV_A		9000
-#define AQ1_JUMBO_MTU_REV_B		16338
-#define AQ2_JUMBO_MTU			16338
-
-/*
- * TERMINOLOGY
- *	ATL  (AQ1) = Atlantic.  AQC100,107-109,111,112.
- *	ATL2 (AQ2) = Atlantic2. AQC113-116.
- *	MPI = MAC PHY INTERFACE?
- *	RPO = RX Protocol Offloading
- *	TPO = TX Protocol Offloading
- *	RPF = RX Packet Filter
- *	TPB = TX Packet buffer
- *	RPB = RX Packet buffer
- *	ART = Action Resolver Table
- *	TC  = Traffic Class
- */
-
-enum aq_hwtype {
-	HWTYPE_AQ1,
-	HWTYPE_AQ2
-};
-
-/* registers */
 #define AQ_FW_SOFTRESET_REG			0x0000
-#define  AQ_FW_SOFTRESET_RESET			__BIT(15) /* soft reset bit */
-#define  AQ_FW_SOFTRESET_DIS			__BIT(14) /* reset disable */
-
+#define  AQ_FW_SOFTRESET_DIS			(1 << 14)
+#define  AQ_FW_SOFTRESET_RESET			(1 << 15)
 #define AQ_FW_VERSION_REG			0x0018
 #define AQ_HW_REVISION_REG			0x001c
-#define AQ2_HW_FPGA_VERSION_REG			0x00f4	/* AQ2 */
+#define AQ2_HW_FPGA_VERSION_REG			0x00f4
 #define AQ_GLB_NVR_INTERFACE1_REG		0x0100
-
 #define AQ_FW_MBOX_CMD_REG			0x0200
 #define  AQ_FW_MBOX_CMD_EXECUTE			0x00008000
 #define  AQ_FW_MBOX_CMD_BUSY			0x00000100
 #define AQ_FW_MBOX_ADDR_REG			0x0208
-#define AQ_FW_MBOX_VAL_REG			0x020c
+#define AQ_FW_MBOX_VAL_REG			0x020C
+#define AQ_FW_GLB_CPU_SEM_REG(i)		(0x03a0 + (i) * 4)
+#define AQ_FW_SEM_RAM_REG			AQ_FW_GLB_CPU_SEM_REG(2)
+#define AQ2_ART_SEM_REG				AQ_FW_GLB_CPU_SEM_REG(3)
+#define AQ_FW_GLB_CTL2_REG			0x0404
+#define AQ_GLB_GENERAL_PROVISIONING9_REG	0x0520
+#define AQ_GLB_NVR_PROVISIONING2_REG		0x0534
+#define AQ_INTR_STATUS_REG			0x2000  /* intr status */
+#define AQ_INTR_STATUS_CLR_REG			0x2050  /* intr status clear */
+#define AQ_INTR_MASK_REG			0x2060	/* intr mask set */
+#define AQ_INTR_MASK_CLR_REG			0x2070	/* intr mask clear */
+#define AQ_INTR_AUTOMASK_REG			0x2090
 
-#define FW2X_LED_MIN_VERSION			0x03010026	/* >= 3.1.38 */
-#define FW2X_LED_REG				0x031c
-#define  FW2X_LED_DEFAULT			0x00000000
-#define  FW2X_LED_NONE				0x0000003f
-#define  FW2X_LINKLED				__BITS(0,1)
-#define   FW2X_LINKLED_ACTIVE			0
-#define   FW2X_LINKLED_ON			1
-#define   FW2X_LINKLED_BLINK			2
-#define   FW2X_LINKLED_OFF			3
-#define  FW2X_STATUSLED				__BITS(2,5)
-#define   FW2X_STATUSLED_ORANGE			0
-#define   FW2X_STATUSLED_ORANGE_BLINK		2
-#define   FW2X_STATUSLED_OFF			3
-#define   FW2X_STATUSLED_GREEN			4
-#define   FW2X_STATUSLED_ORANGE_GREEN_BLINK	8
-#define   FW2X_STATUSLED_GREEN_BLINK		10
+/* AQ_INTR_IRQ_MAP_TXRX_REG 0x2100-0x2140 */
+#define AQ_INTR_IRQ_MAP_TXRX_REG(i)		(0x2100 + ((i) / 2) * 4)
+#define AQ_INTR_IRQ_MAP_TX_REG(i)		AQ_INTR_IRQ_MAP_TXRX_REG(i)
+#define  AQ_INTR_IRQ_MAP_TX_IRQMAP(i)		(0x1FU << (((i) & 1) ? 16 : 24))
+#define  AQ_INTR_IRQ_MAP_TX_EN(i)		(1U << (((i) & 1) ? 23 : 31))
+#define AQ_INTR_IRQ_MAP_RX_REG(i)		AQ_INTR_IRQ_MAP_TXRX_REG(i)
+#define  AQ_INTR_IRQ_MAP_RX_IRQMAP(i)		(0x1FU << (((i) & 1) ? 0 : 8))
+#define  AQ_INTR_IRQ_MAP_RX_EN(i)		(1U << (((i) & 1) ? 7 : 15))
+
+/* AQ_GEN_INTR_MAP_REG[AQ_RINGS_NUM] 0x2180-0x2200 */
+#define AQ_GEN_INTR_MAP_REG(i)			(0x2180 + (i) * 4)
+#define  AQ_B0_ERR_INT				8U
+
+#define AQ_INTR_CTRL_REG			0x2300
+#define  AQ_INTR_CTRL_IRQMODE			((1 << 0) | (1 << 1))
+#define AQ_INTR_CTRL_IRQMODE_LEGACY		0
+#define AQ_INTR_CTRL_IRQMODE_MSI		1
+#define AQ_INTR_CTRL_IRQMODE_MSIX		2
+#define  AQ_INTR_CTRL_MULTIVEC			(1 << 2)
+#define  AQ_INTR_CTRL_RESET_DIS			(1 << 29)
+#define  AQ_INTR_CTRL_RESET_IRQ			(1U << 31)
+#define AQ_MBOXIF_POWER_GATING_CONTROL_REG	0x32a8
 
 #define FW_MPI_MBOX_ADDR_REG			0x0360
 #define FW1X_MPI_INIT1_REG			0x0364
-#define FW1X_MPI_CONTROL_REG			0x0368
-#define FW1X_MPI_STATE_REG			0x036c
-#define  FW1X_MPI_STATE_MODE			__BITS(7,0)
-#define  FW1X_MPI_STATE_SPEED			__BITS(32,16)
-#define  FW1X_MPI_STATE_DISABLE_DIRTYWAKE	__BITS(25)
-#define  FW1X_MPI_STATE_DOWNSHIFT		__BITS(31,28)
 #define FW1X_MPI_INIT2_REG			0x0370
 #define FW1X_MPI_EFUSEADDR_REG			0x0374
 
 #define FW2X_MPI_EFUSEADDR_REG			0x0364
-#define FW2X_MPI_CONTROL_REG			0x0368	/* 64bit */
-#define FW2X_MPI_STATE_REG			0x0370	/* 64bit */
+#define FW2X_MPI_CONTROL_REG			0x0368  /* 64bit */
+#define FW2X_MPI_STATE_REG			0x0370  /* 64bit */
+#define FW_BOOT_EXIT_CODE_REG			0x0388
+
 #define FW_BOOT_EXIT_CODE_REG			0x0388
 #define  RBL_STATUS_DEAD			0x0000dead
 #define  RBL_STATUS_SUCCESS			0x0000abba
 #define  RBL_STATUS_FAILURE			0x00000bad
 #define  RBL_STATUS_HOST_BOOT			0x0000f1a7
-
-#define AQ_FW_GLB_CPU_SEM_REG(i)		(0x03a0 + (i) * 4)
-#define AQ1_FW_SEM_RAM_REG			AQ_FW_GLB_CPU_SEM_REG(2)
-#define AQ2_ART_SEM_REG				AQ_FW_GLB_CPU_SEM_REG(3)
-
-#define AQ_FW_GLB_CTL2_REG			0x0404
-#define  AQ_FW_GLB_CTL2_MCP_UP_FORCE_INTERRUPT	__BIT(1)
-
-#define AQ_GLB_GENERAL_PROVISIONING9_REG	0x0520
-#define AQ_GLB_NVR_PROVISIONING2_REG		0x0534
-
 #define FW_MPI_DAISY_CHAIN_STATUS_REG		0x0704
-
 #define AQ_PCI_REG_CONTROL_6_REG		0x1014
 
-/* msix bitmap */
-#define AQ_INTR_STATUS_REG			0x2000	/* intr status */
-#define AQ_INTR_STATUS_CLR_REG			0x2050	/* intr status clear */
-#define AQ_INTR_MASK_REG			0x2060	/* intr mask set */
-#define AQ_INTR_MASK_CLR_REG			0x2070	/* intr mask clear */
-#define AQ_INTR_AUTOMASK_REG			0x2090
-
-/* AQ_INTR_IRQ_MAP_TXRX_REG[AQ_RINGS_NUM] 0x2100-0x2140 */
-#define AQ_INTR_IRQ_MAP_TXRX_REG(i)		(0x2100 + ((i) / 2) * 4)
-#define AQ_INTR_IRQ_MAP_TX_REG(i)		AQ_INTR_IRQ_MAP_TXRX_REG(i)
-#define  AQ_INTR_IRQ_MAP_TX_IRQMAP(i)		(__BITS(28,24) >> (((i) & 1)*8))
-#define  AQ_INTR_IRQ_MAP_TX_EN(i)		(__BIT(31)     >> (((i) & 1)*8))
-#define AQ_INTR_IRQ_MAP_RX_REG(i)		AQ_INTR_IRQ_MAP_TXRX_REG(i)
-#define  AQ_INTR_IRQ_MAP_RX_IRQMAP(i)		(__BITS(12,8)  >> (((i) & 1)*8))
-#define  AQ_INTR_IRQ_MAP_RX_EN(i)		(__BIT(15)     >> (((i) & 1)*8))
-
-/* AQ_GEN_INTR_MAP_REG[AQ_RINGS_NUM] 0x2180-0x2200 */
-#define AQ_GEN_INTR_MAP_REG(i)			(0x2180 + (i) * 4)
-#define  AQ_B0_ERR_INT				8
-
-#define AQ_INTR_CTRL_REG			0x2300
-#define  AQ_INTR_CTRL_IRQMODE			__BITS(1,0)
-#define  AQ_INTR_CTRL_IRQMODE_LEGACY		0
-#define  AQ_INTR_CTRL_IRQMODE_MSI		1
-#define  AQ_INTR_CTRL_IRQMODE_MSIX		2
-#define  AQ_INTR_CTRL_MULTIVEC			__BIT(2)
-#define  AQ_INTR_CTRL_AUTO_MASK			__BIT(5)
-#define  AQ_INTR_CTRL_CLR_ON_READ		__BIT(7)
-#define  AQ_INTR_CTRL_RESET_DIS			__BIT(29)
-#define  AQ_INTR_CTRL_RESET_IRQ			__BIT(31)
-
-#define AQ_MBOXIF_POWER_GATING_CONTROL_REG	0x32a8
-
 #define FW_MPI_RESETCTRL_REG			0x4000
-#define  FW_MPI_RESETCTRL_RESET_DIS		__BIT(29)
+#define  FW_MPI_RESETCTRL_RESET_DIS		(1 << 29)
 
 #define RX_SYSCONTROL_REG			0x5000
-#define  RX_SYSCONTROL_RPF_TPO_SYS_LOOPBACK	__BIT(8)
-#define  RX_SYSCONTROL_RPB_DMA_SYS_LOOPBACK	__BIT(6)
-#define  RX_SYSCONTROL_RPB_DMA_NET_LOOPBACK	__BIT(4)
-#define  RX_SYSCONTROL_RESET_DIS		__BIT(29)
+#define  RX_SYSCONTROL_RESET_DIS		(1 << 29)
 
 #define RX_TCP_RSS_HASH_REG			0x5040
-#define  RX_TCP_RSS_HASH_RPF2			__BITS(19,16)
-#define  RX_TCP_RSS_HASH_TYPE			__BITS(15,0)
-
-/* for RPF_*_REG.ACTION */
-#define RPF_ACTION_DISCARD			0
-#define RPF_ACTION_HOST				1
-#define RPF_ACTION_MANAGEMENT			2
-#define RPF_ACTION_HOST_MANAGEMENT		3
-#define RPF_ACTION_WOL				4
+#define  RX_TCP_RSS_HASH_RPF2			(0xf << 16)
+#define  RX_TCP_RSS_HASH_TYPE			(0xffff)
 
 #define RPF_L2BC_REG				0x5100
-#define  RPF_L2BC_EN				__BIT(0)
-#define  RPF_L2BC_PROMISC			__BIT(3)
-#define  RPF_L2BC_ACTION			__BITS(12,14)
-#define  RPF_L2BC_THRESHOLD			__BITS(31,16)
+#define  RPF_L2BC_EN				(1 << 0)
+#define  RPF_L2BC_PROMISC			(1 << 3)
+#define  RPF_L2BC_ACTION			0x7000
+#define  RPF_L2BC_THRESHOLD			0xFFFF0000
 
-/* RPF_L2UC_*_REG[34] (AQ2 has [38]) */
-#define RPF_L2UC_LSW_REG(i)			(0x5110 + (i) * 8)
-#define RPF_L2UC_MSW_REG(i)			(0x5114 + (i) * 8)
-#define  RPF_L2UC_MSW_MACADDR_HI		__BITS(15,0)
-#define  RPF_L2UC_MSW_ACTION			__BITS(18,16)
-#define  RPF_L2UC_MSW_TAG			__BITS(27,22)	/* AQ2 */
-#define  RPF_L2UC_MSW_EN			__BIT(31)
+#define AQ_HW_MAC_OWN				0
 
-#define AQ_HW_MAC_OWN				0 /* index of own address */
-#define AQ1_HW_MAC_NUM				34
-#define AQ2_HW_MAC_NUM				38
-#define AQ_HW_MAC_NUM(sc)			\
-	(HWTYPE_AQ2_P((sc)) ? AQ2_HW_MAC_NUM : AQ1_HW_MAC_NUM)
+/* RPF_L2UC_*_REG[34] (actual [38]?) */
+#define RPF_L2UC_LSW_REG(i)                     (0x5110 + (i) * 8)
+#define RPF_L2UC_MSW_REG(i)                     (0x5114 + (i) * 8)
+#define  RPF_L2UC_MSW_MACADDR_HI		0xFFFF
+#define  RPF_L2UC_MSW_ACTION			0x70000
+#define  RPF_L2UC_MSW_TAG			0x03c00000
+#define  RPF_L2UC_MSW_EN			(1U << 31)
+#define AQ_HW_MAC_NUM				34
 
 /* RPF_MCAST_FILTER_REG[8] 0x5250-0x5270 */
 #define RPF_MCAST_FILTER_REG(i)			(0x5250 + (i) * 4)
-#define  RPF_MCAST_FILTER_EN			__BIT(31)
+#define  RPF_MCAST_FILTER_EN			(1U << 31)
 #define RPF_MCAST_FILTER_MASK_REG		0x5270
-#define  RPF_MCAST_FILTER_MASK_ALLMULTI		__BIT(14)
+#define  RPF_MCAST_FILTER_MASK_ALLMULTI		(1 << 14)
 
 #define RPF_VLAN_MODE_REG			0x5280
-#define  RPF_VLAN_MODE_PROMISC			__BIT(1)
-#define  RPF_VLAN_MODE_ACCEPT_UNTAGGED		__BIT(2)
-#define  RPF_VLAN_MODE_UNTAGGED_ACTION		__BITS(5,3)
+#define  RPF_VLAN_MODE_PROMISC			(1 << 1)
+#define  RPF_VLAN_MODE_ACCEPT_UNTAGGED		(1 << 2)
+#define  RPF_VLAN_MODE_UNTAGGED_ACTION		0x38
 
-#define RPF_VLAN_TPID_REG			0x5284
-#define  RPF_VLAN_TPID_OUTER			__BITS(31,16)
-#define  RPF_VLAN_TPID_INNER			__BITS(15,0)
-
-/* RPF_VLAN_FILTER_REG[RPF_VLAN_MAX_FILTERS] 0x5290-0x52d0 */
-#define RPF_VLAN_MAX_FILTERS			16
-#define RPF_VLAN_FILTER_REG(i)			(0x5290 + (i) * 4)
-#define  RPF_VLAN_FILTER_EN			__BIT(31)
-#define  RPF_VLAN_FILTER_RXQ_EN			__BIT(28)
-#define  RPF_VLAN_FILTER_RXQ			__BITS(24,20)
-#define  RPF_VLAN_FILTER_ACTION			__BITS(18,16)
-#define  RPF_VLAN_FILTER_TAG			__BITS(15,12)	/* AQ2 */
-#define  RPF_VLAN_FILTER_ID			__BITS(11,0)
+#define RPF_VLAN_TPID_REG                       0x5284
+#define  RPF_VLAN_TPID_OUTER			0xFFFF0000
+#define  RPF_VLAN_TPID_INNER			0xFFFF
 
 /* RPF_ETHERTYPE_FILTER_REG[AQ_RINGS_NUM] 0x5300-0x5380 */
 #define RPF_ETHERTYPE_FILTER_REG(i)		(0x5300 + (i) * 4)
-#define  RPF_ETHERTYPE_FILTER_EN		__BIT(31)
-#define  RPF_ETHERTYPE_FILTER_PRIO_EN		__BIT(30)
-#define  RPF_ETHERTYPE_FILTER_RXQF_EN		__BIT(29)
-#define  RPF_ETHERTYPE_FILTER_PRIO		__BITS(28,26)
-#define  RPF_ETHERTYPE_FILTER_RXQF		__BITS(24,20)
-#define  RPF_ETHERTYPE_FILTER_MNG_RXQF		__BIT(19)
-#define  RPF_ETHERTYPE_FILTER_ACTION		__BITS(18,16)
-#define  RPF_ETHERTYPE_FILTER_VAL		__BITS(15,0)
+#define  RPF_ETHERTYPE_FILTER_EN		(1U << 31)
 
 /* RPF_L3_FILTER_REG[8] 0x5380-0x53a0 */
 #define RPF_L3_FILTER_REG(i)			(0x5380 + (i) * 4)
-#define  RPF_L3_FILTER_L4_EN			__BIT(31)
-#define  RPF_L3_FILTER_IPV6_EN			__BIT(30)
-#define  RPF_L3_FILTER_SRCADDR_EN		__BIT(29)
-#define  RPF_L3_FILTER_DSTADDR_EN		__BIT(28)
-#define  RPF_L3_FILTER_L4_SRCPORT_EN		__BIT(27)
-#define  RPF_L3_FILTER_L4_DSTPORT_EN		__BIT(26)
-#define  RPF_L3_FILTER_L4_PROTO_EN		__BIT(25)
-#define  RPF_L3_FILTER_ARP_EN			__BIT(24)
-#define  RPF_L3_FILTER_L4_RXQUEUE_EN		__BIT(23)
-#define  RPF_L3_FILTER_L4_RXQUEUE_MANAGEMENT_EN	__BIT(22)
-#define  RPF_L3_FILTER_L4_ACTION		__BITS(16,18)
-#define  RPF_L3_FILTER_L4_RXQUEUE		__BITS(12,8)
-#define  RPF_L3_FILTER_L4_PROTO			__BITS(2,0)
-#define   RPF_L3_FILTER_L4_PROTO_TCP		0
-#define   RPF_L3_FILTER_L4_PROTO_UDP		1
-#define   RPF_L3_FILTER_L4_PROTO_SCTP		2
-#define   RPF_L3_FILTER_L4_PROTO_ICMP		3
-/* parameters of RPF_L3_FILTER_REG[8] */
-#define RPF_L3_FILTER_SRCADDR_REG(i)		(0x53b0 + (i) * 4)
-#define RPF_L3_FILTER_DSTADDR_REG(i)		(0x53d0 + (i) * 4)
-#define RPF_L3_FILTER_L4_SRCPORT_REG(i)		(0x5400 + (i) * 4)
-#define RPF_L3_FILTER_L4_DSTPORT_REG(i)		(0x5420 + (i) * 4)
+#define  RPF_L3_FILTER_L4_EN			(1U << 31)
 
 #define RX_FLR_RSS_CONTROL1_REG			0x54c0
-#define  RX_FLR_RSS_CONTROL1_EN			__BIT(31)
+#define  RX_FLR_RSS_CONTROL1_EN			(1U << 31)
 
-#define RPF_RPB_RX_TC_UPT_REG			0x54c4
-#define  RPF_RPB_RX_TC_UPT_MASK(i)		(0x00000007 << ((i) * 4))
+#define RPF_RPB_RX_TC_UPT_REG                   0x54c4
+#define  RPF_RPB_RX_TC_UPT_MASK(i)              (0x00000007 << ((i) * 4))
 
 #define RPF_RSS_KEY_ADDR_REG			0x54d0
-#define  RPF_RSS_KEY_ADDR			__BITS(4,0)
-#define  RPF_RSS_KEY_WR_EN			__BIT(5)
+#define  RPF_RSS_KEY_ADDR			0x1f
+#define  RPF_RSS_KEY_WR_EN			(1 << 5)
 #define RPF_RSS_KEY_WR_DATA_REG			0x54d4
 #define RPF_RSS_KEY_RD_DATA_REG			0x54d8
 
 #define RPF_RSS_REDIR_ADDR_REG			0x54e0
-#define  RPF_RSS_REDIR_ADDR			__BITS(3,0)
-#define  RPF_RSS_REDIR_WR_EN			__BIT(4)
+#define  RPF_RSS_REDIR_ADDR			0xf
+#define  RPF_RSS_REDIR_WR_EN			(1 << 4)
 
 #define RPF_RSS_REDIR_WR_DATA_REG		0x54e4
-#define  RPF_RSS_REDIR_WR_DATA			__BITS(15,0)
+
 
 #define RPO_HWCSUM_REG				0x5580
-#define  RPO_HWCSUM_IP4CSUM_EN			__BIT(1)
-#define  RPO_HWCSUM_L4CSUM_EN			__BIT(0) /* TCP/UDP/SCTP */
-
-#define RPO_LRO_ENABLE_REG			0x5590
-
-#define RPO_LRO_CONF_REG			0x5594
-#define  RPO_LRO_CONF_QSESSION_LIMIT		__BITS(13,12)
-#define  RPO_LRO_CONF_TOTAL_DESC_LIMIT		__BITS(6,5)
-#define  RPO_LRO_CONF_PATCHOPTIMIZATION_EN	__BIT(15)
-#define  RPO_LRO_CONF_MIN_PAYLOAD_OF_FIRST_PKT	__BITS(4,0)
-#define RPO_LRO_RSC_MAX_REG			0x5598
-
-/* RPO_LRO_LDES_MAX_REG[32/8] 0x55a0-0x55b0 */
-#define RPO_LRO_LDES_MAX_REG(i)			(0x55a0 + (i / 8) * 4)
-#define  RPO_LRO_LDES_MAX_MASK(i)		(0x00000003 << ((i & 7) * 4))
-#define RPO_LRO_TB_DIV_REG			0x5620
-#define  RPO_LRO_TB_DIV				__BITS(20,31)
-#define RPO_LRO_INACTIVE_IVAL_REG		0x5620
-#define  RPO_LRO_INACTIVE_IVAL			__BITS(10,19)
-#define RPO_LRO_MAX_COALESCING_IVAL_REG		0x5620
-#define  RPO_LRO_MAX_COALESCING_IVAL		__BITS(9,0)
+#define  RPO_HWCSUM_L4CSUM_EN			(1 << 0)
+#define  RPO_HWCSUM_IP4CSUM_EN			(1 << 1)
 
 #define RPB_RPF_RX_REG				0x5700
-#define  RPB_RPF_RX_TC_MODE			__BIT(8)
-#define  RPB_RPF_RX_FC_MODE			__BITS(5,4)
-#define  RPB_RPF_RX_BUF_EN			__BIT(0)
+#define  RPB_RPF_RX_TC_MODE			(1 << 8)
+#define  RPB_RPF_RX_FC_MODE			0x30
+#define  RPB_RPF_RX_BUF_EN			(1 << 0)
 
 /* RPB_RXB_BUFSIZE_REG[AQ_TRAFFICCLASS_NUM] 0x5710-0x5790 */
 #define RPB_RXB_BUFSIZE_REG(i)			(0x5710 + (i) * 0x10)
-#define  RPB_RXB_BUFSIZE			__BITS(8,0)
+#define  RPB_RXB_BUFSIZE			0x1FF
 #define RPB_RXB_XOFF_REG(i)			(0x5714 + (i) * 0x10)
-#define  RPB_RXB_XOFF_EN			__BIT(31)
-#define  RPB_RXB_XOFF_THRESH_HI			__BITS(29,16)
-#define  RPB_RXB_XOFF_THRESH_LO			__BITS(13,0)
+#define  RPB_RXB_XOFF_EN			(1U << 31)
+#define  RPB_RXB_XOFF_THRESH_HI                 0x3FFF0000
+#define  RPB_RXB_XOFF_THRESH_LO                 0x3FFF
 
 #define RX_DMA_DESC_CACHE_INIT_REG		0x5a00
-#define  RX_DMA_DESC_CACHE_INIT			__BIT(0)
+#define  RX_DMA_DESC_CACHE_INIT			(1 << 0)
 
-#define RX_DMA_INT_DESC_WRWB_EN_REG		0x05a30
-#define  RX_DMA_INT_DESC_WRWB_EN		__BIT(2)
-#define  RX_DMA_INT_DESC_MODERATE_EN		__BIT(3)
+#define RX_DMA_INT_DESC_WRWB_EN_REG		0x5a30
+#define  RX_DMA_INT_DESC_WRWB_EN		(1 << 2)
+#define  RX_DMA_INT_DESC_MODERATE_EN		(1 << 3)
 
-/* RX_INTR_MODERATION_CTL_REG[AQ_RINGS_NUM] 0x5a40-0x5ac0 */
 #define RX_INTR_MODERATION_CTL_REG(i)		(0x5a40 + (i) * 4)
-#define  RX_INTR_MODERATION_CTL_EN		__BIT(1)
-#define  RX_INTR_MODERATION_CTL_MIN		__BITS(15,8)
-#define  RX_INTR_MODERATION_CTL_MAX		__BITS(24,16)
+#define  RX_INTR_MODERATION_CTL_EN		(1 << 1)
+#define  RX_INTR_MODERATION_CTL_MIN		(0xFF << 8)
+#define  RX_INTR_MODERATION_CTL_MAX		(0x1FF << 16)
 
-/* RX_DMA_DESC_*[AQ_RINGS_NUM] 0x5b00-0x5f00 */
 #define RX_DMA_DESC_BASE_ADDRLSW_REG(i)		(0x5b00 + (i) * 0x20)
 #define RX_DMA_DESC_BASE_ADDRMSW_REG(i)		(0x5b04 + (i) * 0x20)
 #define RX_DMA_DESC_REG(i)			(0x5b08 + (i) * 0x20)
-#define  RX_DMA_DESC_LEN			__BITS(12,3)	/* RXD_NUM/8 */
-#define  RX_DMA_DESC_RESET			__BIT(25)
-#define  RX_DMA_DESC_HEADER_SPLIT		__BIT(28)
-#define  RX_DMA_DESC_VLAN_STRIP			__BIT(29)
-#define  RX_DMA_DESC_EN				__BIT(31)
+#define  RX_DMA_DESC_LEN			(0x3FF << 3)
+#define  RX_DMA_DESC_RESET			(1 << 25)
+#define  RX_DMA_DESC_HEADER_SPLIT		(1 << 28)
+#define  RX_DMA_DESC_VLAN_STRIP			(1 << 29)
+#define  RX_DMA_DESC_EN				(1U << 31)
 #define RX_DMA_DESC_HEAD_PTR_REG(i)		(0x5b0c + (i) * 0x20)
-#define  RX_DMA_DESC_HEAD_PTR			__BITS(12,0)
+#define  RX_DMA_DESC_HEAD_PTR			0xFFF
 #define RX_DMA_DESC_TAIL_PTR_REG(i)		(0x5b10 + (i) * 0x20)
 #define RX_DMA_DESC_BUFSIZE_REG(i)		(0x5b18 + (i) * 0x20)
-#define  RX_DMA_DESC_BUFSIZE_DATA		__BITS(4,0)
-#define  RX_DMA_DESC_BUFSIZE_HDR		__BITS(12,8)
+#define  RX_DMA_DESC_BUFSIZE_DATA		0x000F
+#define  RX_DMA_DESC_BUFSIZE_HDR		0x0FF0
 
-/* RX_DMA_DCAD_REG[AQ_RINGS_NUM] 0x6100-0x6180 */
 #define RX_DMA_DCAD_REG(i)			(0x6100 + (i) * 4)
-#define  RX_DMA_DCAD_CPUID			__BITS(7,0)
-#define  RX_DMA_DCAD_PAYLOAD_EN			__BIT(29)
-#define  RX_DMA_DCAD_HEADER_EN			__BIT(30)
-#define  RX_DMA_DCAD_DESC_EN			__BIT(31)
+#define  RX_DMA_DCAD_CPUID			0xFF
+#define  RX_DMA_DCAD_PAYLOAD_EN			(1 << 29)
+#define  RX_DMA_DCAD_HEADER_EN			(1 << 30)
+#define  RX_DMA_DCAD_DESC_EN			(1U << 31)
 
 #define RX_DMA_DCA_REG				0x6180
-#define  RX_DMA_DCA_EN				__BIT(31)
-#define  RX_DMA_DCA_MODE			__BITS(3,0)
-
-/* counters */
-#define RX_DMA_GOOD_PKT_COUNTERLSW		0x6800
-#define RX_DMA_GOOD_OCTET_COUNTERLSW		0x6808
-#define RX_DMA_DROP_PKT_CNT_REG			0x6818
-#define RX_DMA_COALESCED_PKT_CNT_REG		0x6820
+#define  RX_DMA_DCA_EN				(1U << 31)
+#define  RX_DMA_DCA_MODE			0xF
 
 #define TX_SYSCONTROL_REG			0x7000
-#define  TX_SYSCONTROL_TPO_PKT_SYS_LOOPBACK	__BIT(7)
-#define  TX_SYSCONTROL_TPB_DMA_SYS_LOOPBACK	__BIT(6)
-#define  TX_SYSCONTROL_TPB_DMA_NET_LOOPBACK	__BIT(4)
-#define  TX_SYSCONTROL_RESET_DIS		__BIT(29)
+#define  TX_SYSCONTROL_RESET_DIS		(1 << 29)
 
 #define TX_TPO2_REG				0x7040
-#define  TX_TPO2_EN				__BIT(16)
+#define  TX_TPO2_EN				(1 << 16)
 
 #define TPS_DESC_VM_ARB_MODE_REG		0x7300
-#define  TPS_DESC_VM_ARB_MODE			__BIT(0)
+#define  TPS_DESC_VM_ARB_MODE			(1 << 0)
 #define TPS_DESC_RATE_REG			0x7310
-#define  TPS_DESC_RATE_TA_RST			__BIT(31)
-#define  TPS_DESC_RATE_LIM			__BITS(10,0)
+#define  TPS_DESC_RATE_TA_RST			(1U << 31)
+#define  TPS_DESC_RATE_LIM			0x7FF
 #define TPS_DESC_TC_ARB_MODE_REG		0x7200
-#define  TPS_DESC_TC_ARB_MODE			__BITS(1,0)
+#define  TPS_DESC_TC_ARB_MODE			0x3
 #define TPS_DATA_TC_ARB_MODE_REG		0x7100
-#define  TPS_DATA_TC_ARB_MODE			__BIT(0)
+#define  TPS_DATA_TC_ARB_MODE			(1 << 0)
 
 /* TPS_DATA_TCT_REG[AQ_TRAFFICCLASS_NUM] 0x7110-0x7130 */
 #define TPS_DATA_TCT_REG(i)			(0x7110 + (i) * 4)
-#define  TPS_DATA_TCT_CREDIT_MAX		__BITS(16,27)
-#define  TPS_DATA_TCT_WEIGHT			__BITS(8,0)
+#define  TPS_DATA_TCT_CREDIT_MAX		0xFFF0000
+#define  TPS_DATA_TCT_WEIGHT			0x1FF
+#define  TPS2_DATA_TCT_CREDIT_MAX		0xFFFF0000
+#define  TPS2_DATA_TCT_WEIGHT			0x7FFF
 /* TPS_DATA_TCT_REG[AQ_TRAFFICCLASS_NUM] 0x7210-0x7230 */
 #define TPS_DESC_TCT_REG(i)			(0x7210 + (i) * 4)
-#define  TPS_DESC_TCT_CREDIT_MAX		__BITS(16,27)
-#define  TPS_DESC_TCT_WEIGHT			__BITS(8,0)
+#define  TPS_DESC_TCT_CREDIT_MAX		0xFFF0000
+#define  TPS_DESC_TCT_WEIGHT			0x1FF
 
-#define AQ1_HW_TXBUF_MAX			160
-#define AQ1_HW_RXBUF_MAX			320
-#define AQ2_HW_TXBUF_MAX			128
-#define AQ2_HW_RXBUF_MAX			192
+#define AQ_HW_TXBUF_MAX         160
+#define AQ_HW_RXBUF_MAX         320
+#define AQ2_HW_TXBUF_MAX	128
+#define AQ2_HW_RXBUF_MAX	192
 
 #define TPO_HWCSUM_REG				0x7800
-#define  TPO_HWCSUM_IP4CSUM_EN			__BIT(1)
-#define  TPO_HWCSUM_L4CSUM_EN			__BIT(0) /* TCP/UDP/SCTP */
-
-#define TDM_LSO_EN_REG				0x7810
+#define  TPO_HWCSUM_L4CSUM_EN			(1 << 0)
+#define  TPO_HWCSUM_IP4CSUM_EN			(1 << 1)
 
 #define THM_LSO_TCP_FLAG1_REG			0x7820
-#define  THM_LSO_TCP_FLAG1_FIRST		__BITS(11,0)
-#define  THM_LSO_TCP_FLAG1_MID			__BITS(27,16)
+#define  THM_LSO_TCP_FLAG1_FIRST		0xFFF
+#define  THM_LSO_TCP_FLAG1_MID			0xFFF0000
 #define THM_LSO_TCP_FLAG2_REG			0x7824
-#define  THM_LSO_TCP_FLAG2_LAST			__BITS(11,0)
+#define  THM_LSO_TCP_FLAG2_LAST			0xFFF
 
 #define TPB_TX_BUF_REG				0x7900
-#define  TPB_TX_BUF_EN				__BIT(0)
-#define  TPB_TX_BUF_SCP_INS_EN			__BIT(2)
-#define  TPB_TX_BUF_CLK_GATE_EN			__BIT(5)
-#define  TPB_TX_BUF_TC_MODE			__BIT(8)
-#define  TPB_TX_BUF_TC_Q_RAND_MAP_EN		__BIT(9)	/* AQ2 */
+#define  TPB_TX_BUF_EN				(1 << 0)
+#define  TPB_TX_BUF_SCP_INS_EN			(1 << 2)
+#define  TPB_TX_BUF_CLK_GATE_EN			(1 << 5)
+#define  TPB_TX_BUF_TC_MODE_EN			(1 << 8)
+
 
 /* TPB_TXB_BUFSIZE_REG[AQ_TRAFFICCLASS_NUM] 0x7910-7990 */
 #define TPB_TXB_BUFSIZE_REG(i)			(0x7910 + (i) * 0x10)
-#define  TPB_TXB_BUFSIZE			__BITS(7,0)
-#define TPB_TXB_THRESH_REG(i)			(0x7914 + (i) * 0x10)
-#define  TPB_TXB_THRESH_HI			__BITS(16,28)
-#define  TPB_TXB_THRESH_LO			__BITS(12,0)
+#define  TPB_TXB_BUFSIZE                        (0xFF)
+#define TPB_TXB_THRESH_REG(i)                   (0x7914 + (i) * 0x10)
+#define  TPB_TXB_THRESH_HI                      0x1FFF0000
+#define  TPB_TXB_THRESH_LO                      0x1FFF
 
 #define AQ_HW_TX_DMA_TOTAL_REQ_LIMIT_REG	0x7b20
-#define TX_DMA_INT_DESC_WRWB_EN_REG		0x7b40
-#define  TX_DMA_INT_DESC_WRWB_EN		__BIT(1)
-#define  TX_DMA_INT_DESC_MODERATE_EN		__BIT(4)
 
-/* TX_DMA_DESC_*[AQ_RINGS_NUM] 0x7c00-0x8400 */
+#define TX_DMA_INT_DESC_WRWB_EN_REG		0x7b40
+#define  TX_DMA_INT_DESC_WRWB_EN		(1 << 1)
+#define  TX_DMA_INT_DESC_MODERATE_EN		(1 << 4)
+
 #define TX_DMA_DESC_BASE_ADDRLSW_REG(i)		(0x7c00 + (i) * 0x40)
 #define TX_DMA_DESC_BASE_ADDRMSW_REG(i)		(0x7c04 + (i) * 0x40)
 #define TX_DMA_DESC_REG(i)			(0x7c08 + (i) * 0x40)
-#define  TX_DMA_DESC_LEN			__BITS(12, 3)	/* TXD_NUM/8 */
-#define  TX_DMA_DESC_EN				__BIT(31)
+#define  TX_DMA_DESC_LEN			0x00000FF8
+#define  TX_DMA_DESC_EN				0x80000000
 #define TX_DMA_DESC_HEAD_PTR_REG(i)		(0x7c0c + (i) * 0x40)
-#define  TX_DMA_DESC_HEAD_PTR			__BITS(12,0)
+#define  TX_DMA_DESC_HEAD_PTR			0x00000FFF
 #define TX_DMA_DESC_TAIL_PTR_REG(i)		(0x7c10 + (i) * 0x40)
 #define TX_DMA_DESC_WRWB_THRESH_REG(i)		(0x7c18 + (i) * 0x40)
-#define  TX_DMA_DESC_WRWB_THRESH		__BITS(14,8)
+#define  TX_DMA_DESC_WRWB_THRESH		0x00003F00
 
-/* TDM_DCAD_REG[AQ_RINGS_NUM] 0x8400-0x8480 */
 #define TDM_DCAD_REG(i)				(0x8400 + (i) * 4)
-#define  TDM_DCAD_CPUID				__BITS(7,0)
-#define  TDM_DCAD_CPUID_EN			__BIT(31)
+#define  TDM_DCAD_CPUID				0x7F
+#define  TDM_DCAD_CPUID_EN			0x80000000
 
 #define TDM_DCA_REG				0x8480
-#define  TDM_DCA_EN				__BIT(31)
-#define  TDM_DCA_MODE				__BITS(3,0)
+#define  TDM_DCA_EN				(1U << 31)
+#define  TDM_DCA_MODE				0xF
 
-/* TX_INTR_MODERATION_CTL_REG[AQ_RINGS_NUM] 0x8980-0x8a00 */
 #define TX_INTR_MODERATION_CTL_REG(i)		(0x8980 + (i) * 4)
-#define  TX_INTR_MODERATION_CTL_EN		__BIT(1)
-#define  TX_INTR_MODERATION_CTL_MIN		__BITS(15,8)
-#define  TX_INTR_MODERATION_CTL_MAX		__BITS(24,16)
+#define  TX_INTR_MODERATION_CTL_EN		(1 << 1)
+#define  TX_INTR_MODERATION_CTL_MIN		(0xFF << 8)
+#define  TX_INTR_MODERATION_CTL_MAX		(0x1FF << 16)
 
-/* AQ2 (ATL2) registers */
-#define AQ2_QUEUE_MODE				0x0c9c
+/* AQ2 registers */
 
 #define AQ2_MIF_HOST_FINISHED_STATUS_WRITE_REG	0x0e00
 #define AQ2_MIF_HOST_FINISHED_STATUS_READ_REG	0x0e04
-#define  AQ2_MIF_HOST_FINISHED_STATUS_ACK	__BIT(0)
+#define  AQ2_MIF_HOST_FINISHED_STATUS_ACK	(1 << 0)
 
 #define AQ2_MCP_HOST_REQ_INT_REG		0x0f00
-#define  AQ2_MCP_HOST_REQ_INT_READY		__BIT(0)
+#define  AQ2_MCP_HOST_REQ_INT_READY		(1 << 0)
 #define AQ2_MCP_HOST_REQ_INT_SET_REG		0x0f04
 #define AQ2_MCP_HOST_REQ_INT_CLR_REG		0x0f08
 
-#define AQ2_PHI_EXT_TAG_REG			0x1000
-#define  AQ2_PHI_EXT_TAG_ENABLE			__BIT(5)
-
 #define AQ2_MIF_BOOT_REG			0x3040
-#define  AQ2_MIF_BOOT_HOST_DATA_LOADED		__BIT(16)
-#define  AQ2_MIF_BOOT_BOOT_STARTED		__BIT(24)
-#define  AQ2_MIF_BOOT_CRASH_INIT		__BIT(27)
-#define  AQ2_MIF_BOOT_BOOT_CODE_FAILED		__BIT(28)
-#define  AQ2_MIF_BOOT_FW_INIT_FAILED		__BIT(29)
-#define  AQ2_MIF_BOOT_FW_INIT_COMP_SUCCESS	__BIT(31)
+#define  AQ2_MIF_BOOT_HOST_DATA_LOADED		(1 << 16)
+#define  AQ2_MIF_BOOT_BOOT_STARTED		(1 << 24)
+#define  AQ2_MIF_BOOT_CRASH_INIT		(1 << 27)
+#define  AQ2_MIF_BOOT_BOOT_CODE_FAILED		(1 << 28)
+#define  AQ2_MIF_BOOT_FW_INIT_FAILED		(1 << 29)
+#define  AQ2_MIF_BOOT_FW_INIT_COMP_SUCCESS	(1U << 31)
 
-/* ART(Action Resolver Table) */
-#define AQ2_ART_ACTION_ACT_MASK			__BITS(9,8)
-#define AQ2_ART_ACTION_RSS_MASK			__BIT(7)
-#define AQ2_ART_ACTION_INDEX_MASK		__BITS(6,2)
-#define AQ2_ART_ACTION_ENABLE_MASK		__BIT(0)
+/* AQ2 action resolver table */
+#define AQ2_ART_ACTION_ACT_SHIFT		8
+#define AQ2_ART_ACTION_RSS			0x0080
+#define AQ2_ART_ACTION_INDEX_SHIFT		2
+#define AQ2_ART_ACTION_ENABLE			0x0001
 #define AQ2_ART_ACTION(act, rss, idx, en)		\
-	(__SHIFTIN((act), AQ2_ART_ACTION_ACT_MASK) |	\
-	__SHIFTIN((rss), AQ2_ART_ACTION_RSS_MASK) |	\
-	__SHIFTIN((idx), AQ2_ART_ACTION_INDEX_MASK) |	\
-	__SHIFTIN((en), AQ2_ART_ACTION_ENABLE_MASK))
+	(((act) << AQ2_ART_ACTION_ACT_SHIFT) |		\
+	((rss) ? AQ2_ART_ACTION_RSS : 0) |		\
+	((idx) << AQ2_ART_ACTION_INDEX_SHIFT) |		\
+	((en) ? AQ2_ART_ACTION_ENABLE : 0))
 #define AQ2_ART_ACTION_DROP			AQ2_ART_ACTION(0, 0, 0, 1)
 #define AQ2_ART_ACTION_DISABLE			AQ2_ART_ACTION(0, 0, 0, 0)
 #define AQ2_ART_ACTION_ASSIGN_QUEUE(q)		AQ2_ART_ACTION(1, 0, (q), 1)
 #define AQ2_ART_ACTION_ASSIGN_TC(tc)		AQ2_ART_ACTION(1, 1, (tc), 1)
 
-#define AQ2_RPF_TAG_PCP_MASK			__BITS(31,29)
-#define AQ2_RPF_TAG_FLEX_MASK			__BITS(28,27)
-#define AQ2_RPF_TAG_UNKNOWN_MASK		__BITS(26,24)
-#define AQ2_RPF_TAG_L4_MASK			__BITS(23,21)
-#define AQ2_RPF_TAG_L3_V6_MASK			__BITS(20,18)
-#define AQ2_RPF_TAG_L3_V4_MASK			__BITS(17,15)
-#define AQ2_RPF_TAG_UNTAG_MASK			__BIT(14)
-#define AQ2_RPF_TAG_VLAN_MASK			__BITS(13,10)
-#define AQ2_RPF_TAG_ET_MASK			__BITS(9,7)
-#define AQ2_RPF_TAG_ALLMC_MASK			__BIT(6)
-#define AQ2_RPF_TAG_UC_MASK			__BITS(5,0)
+#define AQ2_RPF_TAG_PCP_MASK			0xe0000000
+#define AQ2_RPF_TAG_PCP_SHIFT			29
+#define AQ2_RPF_TAG_FLEX_MASK			0x18000000
+#define AQ2_RPF_TAG_UNKNOWN_MASK		0x07000000
+#define AQ2_RPF_TAG_L4_MASK			0x00e00000
+#define AQ2_RPF_TAG_L3_V6_MASK			0x001c0000
+#define AQ2_RPF_TAG_L3_V4_MASK			0x00038000
+#define AQ2_RPF_TAG_UNTAG_MASK			0x00004000
+#define AQ2_RPF_TAG_VLAN_MASK			0x00003c00
+#define AQ2_RPF_TAG_ET_MASK			0x00000380
+#define AQ2_RPF_TAG_ALLMC_MASK			0x00000040
+#define AQ2_RPF_TAG_UC_MASK			0x0000002f
 
 /* index of aq2_filter_art_set() */
 #define AQ2_RPF_INDEX_L2_PROMISC_OFF		0
@@ -625,151 +460,118 @@ enum aq_hwtype {
 #define AQ2_RPF_INDEX_PCP_TO_TC			56
 
 #define AQ2_RPF_L2BC_TAG_REG			0x50f0
-#define  AQ2_RPF_L2BC_TAG_MASK			__BITS(5,0)
+#define  AQ2_RPF_L2BC_TAG_MASK			0x0000003f
 
 #define AQ2_RPF_NEW_CTRL_REG			0x5104
-#define  AQ2_RPF_NEW_CTRL_ENABLE		__BIT(11)
-
-#define AQ2_RPF_L2UC_TAG_REG(i)			(0x5110 + (i) * 8)
-#define  AQ2_RPF_L2UC_TAG_MASK			__BITS(27,22)
+#define  AQ2_RPF_NEW_CTRL_ENABLE		(1 << 11)
 
 #define AQ2_RPF_REDIR2_REG			0x54c8
-#define  AQ2_RPF_REDIR2_INDEX			__BIT(12)
-#define  AQ2_RPF_REDIR2_HASHTYPE		__BITS(8,0)
+#define  AQ2_RPF_REDIR2_INDEX			(1 << 12)
+#define  AQ2_RPF_REDIR2_HASHTYPE		0x00000100
 #define  AQ2_RPF_REDIR2_HASHTYPE_NONE		0
-#define  AQ2_RPF_REDIR2_HASHTYPE_IP		__BIT(0)
-#define  AQ2_RPF_REDIR2_HASHTYPE_TCP4		__BIT(1)
-#define  AQ2_RPF_REDIR2_HASHTYPE_UDP4		__BIT(2)
-#define  AQ2_RPF_REDIR2_HASHTYPE_IP6		__BIT(3)
-#define  AQ2_RPF_REDIR2_HASHTYPE_TCP6		__BIT(4)
-#define  AQ2_RPF_REDIR2_HASHTYPE_UDP6		__BIT(5)
-#define  AQ2_RPF_REDIR2_HASHTYPE_IP6EX		__BIT(6)
-#define  AQ2_RPF_REDIR2_HASHTYPE_TCP6EX		__BIT(7)
-#define  AQ2_RPF_REDIR2_HASHTYPE_UDP6EX		__BIT(8)
-#define  AQ2_RPF_REDIR2_HASHTYPE_ALL		__BITS(8,0)
-
-#define AQ2_RX_Q_TC_MAP_REG(i)			(0x5900 + (i) * 4)
-
-#define AQ2_RDM_RX_DESC_RD_REQ_LIMIT_REG	0x5a04
-
-#define AQ2_RPF_RSS_REDIR_REG(tc, i)		\
-	(0x6200 + (0x100 * ((tc) >> 2)) + (i) * 4)
-#define AQ2_RPF_RSS_REDIR_TC_MASK(tc)		\
-	(__BITS(4,0) << (5 * ((tc) & 3)))
-
-#define AQ2_RPF_L3_V6_V4_SELECT_REG		0x6500
-#define  AQ2_RPF_L3_V6_V4_SELECT_EN		__BIT(23)
+#define  AQ2_RPF_REDIR2_HASHTYPE_IP		(1 << 0)
+#define  AQ2_RPF_REDIR2_HASHTYPE_TCP4		(1 << 1)
+#define  AQ2_RPF_REDIR2_HASHTYPE_UDP4		(1 << 2)
+#define  AQ2_RPF_REDIR2_HASHTYPE_IP6		(1 << 3)
+#define  AQ2_RPF_REDIR2_HASHTYPE_TCP6		(1 << 4)
+#define  AQ2_RPF_REDIR2_HASHTYPE_UDP6		(1 << 5)
+#define  AQ2_RPF_REDIR2_HASHTYPE_IP6EX		(1 << 6)
+#define  AQ2_RPF_REDIR2_HASHTYPE_TCP6EX		(1 << 7)
+#define  AQ2_RPF_REDIR2_HASHTYPE_UDP6EX		(1 << 8)
+#define  AQ2_RPF_REDIR2_HASHTYPE_ALL		0x00000100
 
 #define AQ2_RPF_REC_TAB_ENABLE_REG		0x6ff0
-#define  AQ2_RPF_REC_TAB_ENABLE_MASK		__BITS(15,0)
-
-#define AQ2_TX_Q_TC_MAP_REG(i)			(0x799c + (i) * 4)
+#define  AQ2_RPF_REC_TAB_ENABLE_MASK		0x0000ffff
 
 #define AQ2_LAUNCHTIME_CTRL_REG			0x7a1c
-#define  AQ2_LAUNCHTIME_CTRL_RATIO		__BITS(15,8)
-#define  AQ2_LAUNCHTIME_CTRL_RATIO_SPEED_QUATER	4
+#define  AQ2_LAUNCHTIME_CTRL_RATIO		0x0000ff00
+#define  AQ2_LAUNCHTIME_CTRL_RATIO_SPEED_QUARTER 4
 #define  AQ2_LAUNCHTIME_CTRL_RATIO_SPEED_HALF	2
 #define  AQ2_LAUNCHTIME_CTRL_RATIO_SPEED_FULL	1
 
-/* AT2_TX_INTR_MODERATION_CTL_REG[AQ_RINGS_NUM] 0x7c28-0x8428 */
 #define AQ2_TX_INTR_MODERATION_CTL_REG(i)	(0x7c28 + (i) * 0x40)
-#define  AQ2_TX_INTR_MODERATION_CTL_EN		__BIT(1)
-#define  AQ2_TX_INTR_MODERATION_CTL_MIN		__BITS(15,8)
-#define  AQ2_TX_INTR_MODERATION_CTL_MAX		__BITS(24,16)
+#define  AQ2_TX_INTR_MODERATION_CTL_EN		(1 << 1)
+#define  AQ2_TX_INTR_MODERATION_CTL_MIN		0x0000ff00
+#define  AQ2_TX_INTR_MODERATION_CTL_MAX		0x01ff0000
 
-/* RW shared buffer */
-#define AQ2_FW_INTERFACE_IN_MTU_REG				0x12000
-#define AQ2_FW_INTERFACE_IN_MAC_ADDRESS_REG			0x12008
-#define AQ2_FW_INTERFACE_IN_LINK_CONTROL_REG			0x12010
-#define  AQ2_FW_INTERFACE_IN_LINK_CONTROL_PROMISCUOUS_MODE	__BIT(13)
-#define  AQ2_FW_INTERFACE_IN_LINK_CONTROL_FRAME_PADDING_REMOVAL_RX __BIT(12)
-#define  AQ2_FW_INTERFACE_IN_LINK_CONTROL_CRC_FORWARDING	__BIT(11)
-#define  AQ2_FW_INTERFACE_IN_LINK_CONTROL_TX_PADDING		__BIT(10)
-#define  AQ2_FW_INTERFACE_IN_LINK_CONTROL_CONTROL_FRAME		__BIT(9)
-#define  AQ2_FW_INTERFACE_IN_LINK_CONTROL_DISCARD_ERROR_FRAME	__BIT(8)
-#define  AQ2_FW_INTERFACE_IN_LINK_CONTROL_DISABLE_LENGTH_CHECK	__BIT(7)
-#define  AQ2_FW_INTERFACE_IN_LINK_CONTROL_FLOW_CONTROL_MODE	__BIT(6)
-#define  AQ2_FW_INTERFACE_IN_LINK_CONTROL_DISCARD_SHORT_FRAMES	__BIT(5)
-#define  AQ2_FW_INTERFACE_IN_LINK_CONTROL_DISABLE_CRC_CORRUPTION __BIT(4)
-#define  AQ2_FW_INTERFACE_IN_LINK_CONTROL_MODE			__BITS(3,0)
-#define  AQ2_FW_INTERFACE_IN_LINK_CONTROL_MODE_INVALID		0
-#define  AQ2_FW_INTERFACE_IN_LINK_CONTROL_MODE_ACTIVE		1
-#define  AQ2_FW_INTERFACE_IN_LINK_CONTROL_MODE_SLEEP_PROXY	2
-#define  AQ2_FW_INTERFACE_IN_LINK_CONTROL_MODE_LOWPOWER		3
-#define  AQ2_FW_INTERFACE_IN_LINK_CONTROL_MODE_SHUTDOWN		4
+#define AQ2_FW_INTERFACE_IN_MTU_REG		0x12000
+#define AQ2_FW_INTERFACE_IN_MAC_ADDRESS_REG	0x12008
 
-#define AQ2_FW_INTERFACE_IN_LINK_OPTIONS_REG			0x12018
-#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_DOWNSHIFT_RETRY	__BITS(31,28)
-#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_DOWNSHIFT		__BIT(27)
-#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_PAUSE_TX		__BIT(25)
-#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_PAUSE_RX		__BIT(24)
-#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_EEE_10G		__BIT(20)
-#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_EEE_5G		__BIT(19)
-#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_EEE_2G5		__BIT(18)
-#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_EEE_1G		__BIT(17)
-#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_EEE_100M		__BIT(16)
-#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_RATE_10G		__BIT(15)
-#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_RATE_N5G		__BIT(14)
-#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_RATE_5G		__BIT(13)
-#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_RATE_N2G5		__BIT(12)
-#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_RATE_2G5		__BIT(11)
-#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_RATE_1G		__BIT(10)
-#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_RATE_100M		__BIT(9)
-#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_RATE_10M		__BIT(8)
-#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_RATE_1G_HD		__BIT(7)
-#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_RATE_100M_HD		__BIT(6)
-#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_RATE_10M_HD		__BIT(5)
-#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_EXTERNAL_LOOPBACK	__BIT(4)
-#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_INTERNAL_LOOPBACK	__BIT(3)
-#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_MINIMAL_LINK_SPEED	__BIT(2)
-#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_LINK_RENEGOTIATE	__BIT(1)
-#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_LINK_UP		__BIT(0)
+#define AQ2_FW_INTERFACE_IN_LINK_CONTROL_REG	0x12010
+#define  AQ2_FW_INTERFACE_IN_LINK_CONTROL_MODE	0x0000000f
+#define  AQ2_FW_INTERFACE_IN_LINK_CONTROL_MODE_INVALID	0
+#define  AQ2_FW_INTERFACE_IN_LINK_CONTROL_MODE_ACTIVE	1
+#define  AQ2_FW_INTERFACE_IN_LINK_CONTROL_MODE_SLEEP_PROXY 2
+#define  AQ2_FW_INTERFACE_IN_LINK_CONTROL_MODE_LOWPOWER	3
+#define  AQ2_FW_INTERFACE_IN_LINK_CONTROL_MODE_SHUTDOWN	4
 
-#define AQ2_FW_INTERFACE_IN_THERMAL_SHUTDOWN_REG		0x12020
-#define  AQ2_FW_INTERFACE_IN_THERMAL_SHUTDOWN_WARN_TEMP		__BITS(24,31)
-#define  AQ2_FW_INTERFACE_IN_THERMAL_SHUTDOWN_COLD_TEMP		__BITS(16,23)
-#define  AQ2_FW_INTERFACE_IN_THERMAL_SHUTDOWN_SHUTDOWN_TEMP	__BITS(15,8)
-#define  AQ2_FW_INTERFACE_IN_THERMAL_SHUTDOWN_WARNING_ENABLE	__BIT(1)
-#define  AQ2_FW_INTERFACE_IN_THERMAL_SHUTDOWN_ENABLE		__BIT(0)
+#define AQ2_FW_INTERFACE_IN_LINK_OPTIONS_REG	0x12018
+#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_DOWNSHIFT	(1 << 27)
+#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_PAUSE_TX	(1 << 25)
+#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_PAUSE_RX	(1 << 24)
+#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_EEE_10G	(1 << 20)
+#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_EEE_5G	(1 << 19)
+#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_EEE_2G5	(1 << 18)
+#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_EEE_1G	(1 << 17)
+#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_EEE_100M	(1 << 16)
+#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_RATE_10G	(1 << 15)
+#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_RATE_N5G	(1 << 14)
+#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_RATE_5G	(1 << 13)
+#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_RATE_N2G5	(1 << 12)
+#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_RATE_2G5	(1 << 11)
+#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_RATE_1G	(1 << 10)
+#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_RATE_100M	(1 << 9)
+#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_RATE_10M	(1 << 8)
+#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_RATE_1G_HD	(1 << 7)
+#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_RATE_100M_HD	(1 << 6)
+#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_RATE_10M_HD	(1 << 5)
+#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_EXTERNAL_LOOPBACK (1 << 4)
+#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_INTERNAL_LOOPBACK (1 << 3)
+#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_MINIMAL_LINK_SPEED (1 << 2)
+#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_LINK_RENEGOTIATE (1 << 1)
+#define  AQ2_FW_INTERFACE_IN_LINK_OPTIONS_LINK_UP	(1 << 0)
 
-#define AQ2_FW_INTERFACE_IN_SLEEP_PROXY				0x12028
-#define AQ2_FW_INTERFACE_IN_PAUSE_QUANTA			0x12984
+#define AQ2_FW_INTERFACE_IN_REQUEST_POLICY_REG	0x12a58
+#define  AQ2_FW_INTERFACE_IN_REQUEST_POLICY_MCAST_QUEUE_OR_TC		0x00800000
+#define  AQ2_FW_INTERFACE_IN_REQUEST_POLICY_MCAST_RX_QUEUE_TC_INDEX	0x007c0000
+#define  AQ2_FW_INTERFACE_IN_REQUEST_POLICY_MCAST_ACCEPT		0x00010000
+#define  AQ2_FW_INTERFACE_IN_REQUEST_POLICY_BCAST_QUEUE_OR_TC		0x00008000
+#define  AQ2_FW_INTERFACE_IN_REQUEST_POLICY_BCAST_RX_QUEUE_TC_INDEX	0x00007c00
+#define  AQ2_FW_INTERFACE_IN_REQUEST_POLICY_BCAST_ACCEPT		0x00000100
+#define  AQ2_FW_INTERFACE_IN_REQUEST_POLICY_PROMISC_QUEUE_OR_TC		0x00000080
+#define  AQ2_FW_INTERFACE_IN_REQUEST_POLICY_PROMISC_RX_QUEUE_TX_INDEX	0x0000007c
+#define  AQ2_FW_INTERFACE_IN_REQUEST_POLICY_PROMISC_MCAST		0x00000002
+#define  AQ2_FW_INTERFACE_IN_REQUEST_POLICY_PROMISC_ALL			0x00000001
 
-#define AQ2_FW_INTERFACE_IN_CABLE_DIAG_CONTROL_REG		0x12a44
-#define AQ2_FW_INTERFACE_IN_DATA_BUFFER_STATUS_OFF_REG		0x12a4c
-#define AQ2_FW_INTERFACE_IN_DATA_BUFFER_STATUS_LEN_REG		0x12a50
-#define AQ2_FW_INTERFACE_IN_REQUEST_POLICY_REG			0x12a58
-#define  AQ2_FW_INTERFACE_IN_REQUEST_POLICY_MCAST_QUEUE_OR_TC		__BIT(23)
-#define  AQ2_FW_INTERFACE_IN_REQUEST_POLICY_MCAST_RX_QUEUE_TC_INDEX	__BITS(22,18)
-#define  AQ2_FW_INTERFACE_IN_REQUEST_POLICY_MCAST_ACCEPT		__BIT(16)
-#define  AQ2_FW_INTERFACE_IN_REQUEST_POLICY_BCAST_QUEUE_OR_TC		__BIT(15)
-#define  AQ2_FW_INTERFACE_IN_REQUEST_POLICY_BCAST_RX_QUEUE_TC_INDEX	__BITS(14,10)
-#define  AQ2_FW_INTERFACE_IN_REQUEST_POLICY_BCAST_ACCEPT		__BIT(8)
-#define  AQ2_FW_INTERFACE_IN_REQUEST_POLICY_PROMISC_QUEUE_OR_TC		__BIT(7)
-#define  AQ2_FW_INTERFACE_IN_REQUEST_POLICY_PROMISC_RX_QUEUE_TX_INDEX	__BITS(6,2)
-#define  AQ2_FW_INTERFACE_IN_REQUEST_POLICY_PROMISC_MCAST		__BIT(1)
-#define  AQ2_FW_INTERFACE_IN_REQUEST_POLICY_PROMISC_ALL			__BIT(0)
+#define AQ2_FW_INTERFACE_OUT_TRANSACTION_ID_REG	0x13000
+#define  AQ2_FW_INTERFACE_OUT_TRANSACTION_ID_B	0xffff0000
+#define  AQ2_FW_INTERFACE_OUT_TRANSACTION_ID_B_S 16
+#define  AQ2_FW_INTERFACE_OUT_TRANSACTION_ID_A	0x0000ffff
+#define  AQ2_FW_INTERFACE_OUT_TRANSACTION_ID_A_S 0
 
-/* RO shared buffer */
-#define AQ2_FW_INTERFACE_OUT_TRANSACTION_ID_REG		0x13000
-#define  AQ2_FW_INTERFACE_OUT_TRANSACTION_ID_B		__BITS(31,16)
-#define  AQ2_FW_INTERFACE_OUT_TRANSACTION_ID_A		__BITS(15,0)
-#define AQ2_FW_INTERFACE_OUT_VERSION_BUNDLE_REG		0x13004
-#define AQ2_FW_INTERFACE_OUT_VERSION_MAC_REG		0x13008
-#define AQ2_FW_INTERFACE_OUT_VERSION_PHY_REG		0x1300c
-#define  AQ2_FW_INTERFACE_OUT_VERSION_BUILD		__BITS(31,16)
-#define  AQ2_FW_INTERFACE_OUT_VERSION_MINOR		__BITS(8,15)
-#define  AQ2_FW_INTERFACE_OUT_VERSION_MAJOR		__BITS(7,0)
-#define AQ2_FW_INTERFACE_OUT_VERSION_IFACE_REG		0x13010
-#define  AQ2_FW_INTERFACE_OUT_VERSION_IFACE_VER		__BITS(3,0)
-#define  AQ2_FW_INTERFACE_OUT_VERSION_IFACE_VER_A0	0
-#define  AQ2_FW_INTERFACE_OUT_VERSION_IFACE_VER_B0	1
-#define AQ2_FW_INTERFACE_OUT_LINK_STATUS_REG		0x13014
-#define  AQ2_FW_INTERFACE_OUT_LINK_STATUS_DUPLEX	__BIT(11)
-#define  AQ2_FW_INTERFACE_OUT_LINK_STATUS_EEE		__BIT(10)
-#define  AQ2_FW_INTERFACE_OUT_LINK_STATUS_PAUSE_RX	__BIT(9)
-#define  AQ2_FW_INTERFACE_OUT_LINK_STATUS_PAUSE_TX	__BIT(8)
-#define  AQ2_FW_INTERFACE_OUT_LINK_STATUS_RATE		__BITS(7,4)
+#define AQ2_FW_INTERFACE_OUT_VERSION_BUNDLE_REG	0x13004
+#define AQ2_FW_INTERFACE_OUT_VERSION_MAC_REG	0x13008
+
+#define AQ2_FW_INTERFACE_OUT_VERSION_PHY_REG	0x1300c
+#define  AQ2_FW_INTERFACE_OUT_VERSION_BUILD	0xffff0000
+#define  AQ2_FW_INTERFACE_OUT_VERSION_BUILD_S	16
+#define  AQ2_FW_INTERFACE_OUT_VERSION_MINOR	0x0000ff00
+#define  AQ2_FW_INTERFACE_OUT_VERSION_MINOR_S	8
+#define  AQ2_FW_INTERFACE_OUT_VERSION_MAJOR	0x000000ff
+#define  AQ2_FW_INTERFACE_OUT_VERSION_MAJOR_S	0
+
+#define AQ2_FW_INTERFACE_OUT_VERSION_IFACE_REG	0x13010
+#define  AQ2_FW_INTERFACE_OUT_VERSION_IFACE_VER	0x0000000f
+#define  AQ2_FW_INTERFACE_OUT_VERSION_IFACE_VER_A0 0
+#define  AQ2_FW_INTERFACE_OUT_VERSION_IFACE_VER_B0 1
+
+#define AQ2_FW_INTERFACE_OUT_LINK_STATUS_REG	0x13014
+#define  AQ2_FW_INTERFACE_OUT_LINK_STATUS_DUPLEX	(1 << 11)
+#define  AQ2_FW_INTERFACE_OUT_LINK_STATUS_EEE		(1 << 10)
+#define  AQ2_FW_INTERFACE_OUT_LINK_STATUS_PAUSE_RX	(1 << 9)
+#define  AQ2_FW_INTERFACE_OUT_LINK_STATUS_PAUSE_TX	(1 << 8)
+#define  AQ2_FW_INTERFACE_OUT_LINK_STATUS_RATE		0x000000f0
+#define  AQ2_FW_INTERFACE_OUT_LINK_STATUS_RATE_S	4
 #define  AQ2_FW_INTERFACE_OUT_LINK_STATUS_RATE_10G	6
 #define  AQ2_FW_INTERFACE_OUT_LINK_STATUS_RATE_5G	5
 #define  AQ2_FW_INTERFACE_OUT_LINK_STATUS_RATE_2G5	4
@@ -777,206 +579,129 @@ enum aq_hwtype {
 #define  AQ2_FW_INTERFACE_OUT_LINK_STATUS_RATE_100M	2
 #define  AQ2_FW_INTERFACE_OUT_LINK_STATUS_RATE_10M	1
 #define  AQ2_FW_INTERFACE_OUT_LINK_STATUS_RATE_INVALID	0
-#define  AQ2_FW_INTERFACE_OUT_LINK_STATUS_STATE		__BITS(3,0)
-#define AQ2_FW_INTERFACE_OUT_WOL_STATUS_REG		0x13018
+#define  AQ2_FW_INTERFACE_OUT_LINK_STATUS_STATE		0x0000000f
 
-#define AQ2_FW_INTERFACE_OUT_MAC_HEALTH_MONITOR		0x13610
-#define AQ2_FW_INTERFACE_OUT_PHY_HEALTH_MONITOR		0x13620
-typedef struct aq2_health_monitor {
-	uint32_t data1;
-#define HEALTH_MONITOR_DATA1_READY			__BIT(0)
-#define HEALTH_MONITOR_DATA1_FAULT			__BIT(1)
-#define HEALTH_MONITOR_DATA1_FLASHLESS_FINISHED		__BIT(2)
-#define HEALTH_MONITOR_DATA1_HOT_WARNING		__BIT(2)
-#define HEALTH_MONITOR_DATA1_TEMPERATURE		__BITS(15,8)
-#define HEALTH_MONITOR_DATA1_HEARTBEAT			__BITS(31,16)
-	uint32_t data2;
-#define HEALTH_MONITOR_DATA2_FAULTCODE			__BITS(15,0)
-} aq2_health_monitor_t;
+#define AQ2_FW_INTERFACE_OUT_FILTER_CAPS_REG	0x13774
+#define  AQ2_FW_INTERFACE_OUT_FILTER_CAPS3_RESOLVER_BASE_INDEX 0x00ff0000
+#define  AQ2_FW_INTERFACE_OUT_FILTER_CAPS3_RESOLVER_BASE_INDEX_SHIFT 16
 
-#define AQ2_FW_INTERFACE_OUT_CABLE_DIAG_STATUS_LANE_REG(i) (0x13630 + (i) * 4)
-#define AQ2_FW_INTERFACE_OUT_CABLE_DIAG_STATUS_IDSTAT_REG	0x13640
-#define  AQ2_FW_INTERFACE_OUT_CABLE_DIAG_STATUS_IDSTAT_ID	__BITS(7,0)
-#define  AQ2_FW_INTERFACE_OUT_CABLE_DIAG_STATUS_IDSTAT_STATUS	__BITS(8,11)
+#define AQ2_RPF_ACT_ART_REQ_TAG_REG(i)		(0x14000 + (i) * 0x10)
+#define AQ2_RPF_ACT_ART_REQ_MASK_REG(i)		(0x14004 + (i) * 0x10)
+#define AQ2_RPF_ACT_ART_REQ_ACTION_REG(i)	(0x14008 + (i) * 0x10)
 
-#define AQ2_FW_INTERFACE_OUT_DEVICE_LINK_CAPS_REG	0x13648
-#define AQ2_FW_INTERFACE_OUT_SLEEP_PROXY_CAPS_REG	0x13650
-#define AQ2_FW_INTERFACE_OUT_LKP_LINK_CAPS_REG		0x13660
-#define  AQ2_FW_INTERFACE_OUT_LKP_LINK_CAPS_PAUSE_TX	__BIT(25)
-#define  AQ2_FW_INTERFACE_OUT_LKP_LINK_CAPS_PAUSE_RX	__BIT(24)
-#define  AQ2_FW_INTERFACE_OUT_LKP_LINK_CAPS_EEE_10G	__BIT(23)
-#define  AQ2_FW_INTERFACE_OUT_LKP_LINK_CAPS_EEE_5G	__BIT(21)
-#define  AQ2_FW_INTERFACE_OUT_LKP_LINK_CAPS_EEE_2G5	__BIT(19)
-#define  AQ2_FW_INTERFACE_OUT_LKP_LINK_CAPS_EEE_1G	__BIT(18)
-#define  AQ2_FW_INTERFACE_OUT_LKP_LINK_CAPS_EEE_100M	__BIT(17)
-#define  AQ2_FW_INTERFACE_OUT_LKP_LINK_CAPS_RATE_10G	__BIT(15)
-#define  AQ2_FW_INTERFACE_OUT_LKP_LINK_CAPS_RATE_N5G	__BIT(14)
-#define  AQ2_FW_INTERFACE_OUT_LKP_LINK_CAPS_RATE_5G	__BIT(13)
-#define  AQ2_FW_INTERFACE_OUT_LKP_LINK_CAPS_RATE_N2G5	__BIT(12)
-#define  AQ2_FW_INTERFACE_OUT_LKP_LINK_CAPS_RATE_2G5	__BIT(11)
-#define  AQ2_FW_INTERFACE_OUT_LKP_LINK_CAPS_RATE_1G	__BIT(10)
-#define  AQ2_FW_INTERFACE_OUT_LKP_LINK_CAPS_RATE_100M	__BIT(9)
-#define  AQ2_FW_INTERFACE_OUT_LKP_LINK_CAPS_RATE_10M	__BIT(8)
-#define  AQ2_FW_INTERFACE_OUT_LKP_LINK_CAPS_RATE_1G_HD	__BIT(7)
-#define  AQ2_FW_INTERFACE_OUT_LKP_LINK_CAPS_RATE_100M_HD __BIT(6)
-#define  AQ2_FW_INTERFACE_OUT_LKP_LINK_CAPS_RATE_10M_HD	__BIT(5)
+#define __LOWEST_SET_BIT(__mask) (((((uint32_t)__mask) - 1) & ((uint32_t)__mask)) ^ ((uint32_t)__mask))
+#define __SHIFTIN(__x, __mask) ((__x) * __LOWEST_SET_BIT(__mask))
 
-#define AQ2_FW_INTERFACE_OUT_CORE_DUMP_REG		0x13668
-#define AQ2_FW_INTERFACE_OUT_STATS_REG			0x13700
-struct aq2_statistics_a0 {
-	uint32_t link_up;
-	uint32_t link_down;
-	uint64_t tx_unicast_octets;
-	uint64_t tx_multicast_octets;
-	uint64_t tx_broadcast_octets;
-	uint64_t rx_unicast_octets;
-	uint64_t rx_multicast_octets;
-	uint64_t rx_broadcast_octets;
-	uint32_t tx_unicast_frames;
-	uint32_t tx_multicast_frames;
-	uint32_t tx_broadcast_frames;
-	uint32_t tx_errors;
-	uint32_t rx_unicast_frames;
-	uint32_t rx_multicast_frames;
-	uint32_t rx_broadcast_frames;
-	uint32_t rx_dropped_frames;
-	uint32_t rx_errors;
-	uint32_t tx_good_frames;
-	uint32_t rx_good_frames;
-	uint32_t reserved1;
-	uint32_t main_loop_cycles;
-	uint32_t reserved2;
-};
+#define AQ_READ_REG(sc, reg) \
+	bus_space_read_4((sc)->sc_iot, (sc)->sc_ioh, (reg))
+#define AQ_READ_REGS(sc, reg, p, cnt) \
+	bus_space_read_region_4((sc)->sc_iot, (sc)->sc_ioh, (reg), (p), (cnt));
 
-struct aq2_statistics_b0 {
-	uint64_t rx_good_octets;
-	uint64_t rx_pause_frames;
-	uint64_t rx_good_frames;
-	uint64_t rx_errors;
-	uint64_t rx_unicast_frames;
-	uint64_t rx_multicast_frames;
-	uint64_t rx_broadcast_frames;
-	uint64_t tx_good_octets;
-	uint64_t tx_pause_frames;
-	uint64_t tx_good_frames;
-	uint64_t tx_errors;
-	uint64_t tx_unicast_frames;
-	uint64_t tx_multicast_frames;
-	uint64_t tx_broadcast_frames;
-	uint32_t main_loop_cycles;
-} __packed;
+#define AQ_WRITE_REG(sc, reg, val) \
+	bus_space_write_4((sc)->sc_iot, (sc)->sc_ioh, (reg), (val))
 
-typedef struct aq2_statistics {
-	union {
-		struct aq2_statistics_a0 a0;
-		struct aq2_statistics_b0 b0;
-	};
-} aq2_statistics_t;
+#define AQ_WRITE_REG_BIT(sc, reg, mask, val)                    \
+	do {                                                    \
+		uint32_t _v;                                    \
+		_v = AQ_READ_REG((sc), (reg));                  \
+		_v &= ~(mask);                                  \
+		if ((val) != 0)                                 \
+			_v |= __SHIFTIN((val), (mask));         \
+		AQ_WRITE_REG((sc), (reg), _v);                  \
+	} while (/* CONSTCOND */ 0)
 
-#define AQ2_FW_INTERFACE_OUT_FILTER_CAPS_REG		0x13774
-typedef struct aq2_filter_caps {
-	uint32_t caps1;
-#define  AQ2_FW_INTERFACE_OUT_FILTER_CAPS1_ETHTYPE_FILTER_COUNT		__BITS(24,31)
-#define  AQ2_FW_INTERFACE_OUT_FILTER_CAPS1_ETHTYPE_FILTER_BASE_INDEX	__BITS(16,23)
-#define  AQ2_FW_INTERFACE_OUT_FILTER_CAPS1_L2_FILTER_COUNT		__BITS(8,15)
-#define  AQ2_FW_INTERFACE_OUT_FILTER_CAPS1_FLEXIBLE_FILTER_MASK		__BITS(6,7)
-#define  AQ2_FW_INTERFACE_OUT_FILTER_CAPS1_L2_FILTER_BASE_INDEX		__BITS(0,5)
-	uint32_t caps2;
-#define  AQ2_FW_INTERFACE_OUT_FILTER_CAPS2_L3_IP6_FILTER_COUNT		__BITS(28,31)
-#define  AQ2_FW_INTERFACE_OUT_FILTER_CAPS2_L3_IP6_FILTER_BASE_INDEX	__BITS(24,27)
-#define  AQ2_FW_INTERFACE_OUT_FILTER_CAPS2_L3_IP4_FILTER_COUNT		__BITS(20,23)
-#define  AQ2_FW_INTERFACE_OUT_FILTER_CAPS2_L3_IP4_FILTER_BASE_INDEX	__BITS(16,19)
-#define  AQ2_FW_INTERFACE_OUT_FILTER_CAPS2_VLAN_FILTER_COUNT		__BITS(8,15)
-#define  AQ2_FW_INTERFACE_OUT_FILTER_CAPS2_VLAN_FILTER_BASE_INDEX	__BITS(0,7)
-	uint32_t caps3;
-#define  AQ2_FW_INTERFACE_OUT_FILTER_CAPS3_RESOLVER_TABLE_COUNT		__BITS(24,31)
-#define  AQ2_FW_INTERFACE_OUT_FILTER_CAPS3_RESOLVER_BASE_INDEX		__BITS(16,23)
-#define  AQ2_FW_INTERFACE_OUT_FILTER_CAPS3_L4_FLEX_FILTER_COUNT		__BITS(12,15)
-#define  AQ2_FW_INTERFACE_OUT_FILTER_CAPS3_L4_FLEX_FILTER_BASE_INDEX	__BITS(8,11)
-#define  AQ2_FW_INTERFACE_OUT_FILTER_CAPS3_L4_FILTER_COUNT		__BITS(4,7)
-#define  AQ2_FW_INTERFACE_OUT_FILTER_CAPS3_L4_FILTER_BASE_INDEX		__BITS(0,3)
-} aq2_filter_caps_t;
+#define AQ_READ64_REG(sc, reg)					\
+	((uint64_t)AQ_READ_REG(sc, reg) |			\
+	(((uint64_t)AQ_READ_REG(sc, (reg) + 4)) << 32))
 
-#define AQ2_FW_INTERFACE_OUT_DEVICE_CAPS_REG		0x13780
-#define AQ2_FW_INTERFACE_OUT_MANAGEMENT_STATUS_REG	0x1378c
-#define AQ2_FW_INTERFACE_OUT_TRACE_REG			0x13800
+#define AQ_WRITE64_REG(sc, reg, val)				\
+	do {							\
+		AQ_WRITE_REG(sc, reg, (uint32_t)val);		\
+		AQ_WRITE_REG(sc, reg + 4, (uint32_t)(val >> 32)); \
+	} while (/* CONSTCOND */0)
 
-#define AQ2_RPF_ACT_ART_REQ_TAG_REG(i)			(0x14000 + (i) * 0x10)
-#define AQ2_RPF_ACT_ART_REQ_MASK_REG(i)			(0x14004 + (i) * 0x10)
-#define AQ2_RPF_ACT_ART_REQ_ACTION_REG(i)		(0x14008 + (i) * 0x10)
+#define WAIT_FOR(expr, us, n, errp)                             \
+	do {                                                    \
+		unsigned int _n;                                \
+		for (_n = n; (!(expr)) && _n != 0; --_n) {      \
+			delay((us));                            \
+		}                                               \
+		if ((errp != NULL)) {                           \
+			if (_n == 0)                            \
+				*(errp) = ETIMEDOUT;            \
+			else                                    \
+				*(errp) = 0;                    \
+		}                                               \
+	} while (/* CONSTCOND */ 0)
 
-#define FW1X_CTRL_10G				__BIT(0)
-#define FW1X_CTRL_5G				__BIT(1)
-#define FW1X_CTRL_5GSR				__BIT(2)
-#define FW1X_CTRL_2G5				__BIT(3)
-#define FW1X_CTRL_1G				__BIT(4)
-#define FW1X_CTRL_100M				__BIT(5)
+#define FW_VERSION_MAJOR(sc)	(((sc)->sc_fw_version >> 24) & 0xff)
+#define FW_VERSION_MINOR(sc)	(((sc)->sc_fw_version >> 16) & 0xff)
+#define FW_VERSION_BUILD(sc)	((sc)->sc_fw_version & 0xffff)
 
-#define FW2X_CTRL_10BASET_HD			__BIT(0)
-#define FW2X_CTRL_10BASET_FD			__BIT(1)
-#define FW2X_CTRL_100BASETX_HD			__BIT(2)
-#define FW2X_CTRL_100BASET4_HD			__BIT(3)
-#define FW2X_CTRL_100BASET2_HD			__BIT(4)
-#define FW2X_CTRL_100BASETX_FD			__BIT(5)
-#define FW2X_CTRL_100BASET2_FD			__BIT(6)
-#define FW2X_CTRL_1000BASET_HD			__BIT(7)
-#define FW2X_CTRL_1000BASET_FD			__BIT(8)
-#define FW2X_CTRL_2P5GBASET_FD			__BIT(9)
-#define FW2X_CTRL_5GBASET_FD			__BIT(10)
-#define FW2X_CTRL_10GBASET_FD			__BIT(11)
-#define FW2X_CTRL_RESERVED1			__BIT(32)
-#define FW2X_CTRL_10BASET_EEE			__BIT(33)
-#define FW2X_CTRL_RESERVED2			__BIT(34)
-#define FW2X_CTRL_PAUSE				__BIT(35)
-#define FW2X_CTRL_ASYMMETRIC_PAUSE		__BIT(36)
-#define FW2X_CTRL_100BASETX_EEE			__BIT(37)
-#define FW2X_CTRL_RESERVED3			__BIT(38)
-#define FW2X_CTRL_RESERVED4			__BIT(39)
-#define FW2X_CTRL_1000BASET_FD_EEE		__BIT(40)
-#define FW2X_CTRL_2P5GBASET_FD_EEE		__BIT(41)
-#define FW2X_CTRL_5GBASET_FD_EEE		__BIT(42)
-#define FW2X_CTRL_10GBASET_FD_EEE		__BIT(43)
-#define FW2X_CTRL_RESERVED5			__BIT(44)
-#define FW2X_CTRL_RESERVED6			__BIT(45)
-#define FW2X_CTRL_RESERVED7			__BIT(46)
-#define FW2X_CTRL_RESERVED8			__BIT(47)
-#define FW2X_CTRL_RESERVED9			__BIT(48)
-#define FW2X_CTRL_CABLE_DIAG			__BIT(49)
-#define FW2X_CTRL_TEMPERATURE			__BIT(50)
-#define FW2X_CTRL_DOWNSHIFT			__BIT(51)
-#define FW2X_CTRL_PTP_AVB_EN			__BIT(52)
-#define FW2X_CTRL_MEDIA_DETECT			__BIT(53)
-#define FW2X_CTRL_LINK_DROP			__BIT(54)
-#define FW2X_CTRL_SLEEP_PROXY			__BIT(55)
-#define FW2X_CTRL_WOL				__BIT(56)
-#define FW2X_CTRL_MAC_STOP			__BIT(57)
-#define FW2X_CTRL_EXT_LOOPBACK			__BIT(58)
-#define FW2X_CTRL_INT_LOOPBACK			__BIT(59)
-#define FW2X_CTRL_EFUSE_AGENT			__BIT(60)
-#define FW2X_CTRL_WOL_TIMER			__BIT(61)
-#define FW2X_CTRL_STATISTICS			__BIT(62)
-#define FW2X_CTRL_TRANSACTION_ID		__BIT(63)
+#define FEATURES_MIPS		0x00000001
+#define FEATURES_TPO2		0x00000002
+#define FEATURES_RPF2		0x00000004
+#define FEATURES_MPI_AQ		0x00000008
+#define FEATURES_AQ1_REV_A0	0x01000000
+#define FEATURES_AQ1_REV_A	(FEATURES_AQ1_REV_A0)
+#define FEATURES_AQ1_REV_B0	0x02000000
+#define FEATURES_AQ1_REV_B1	0x04000000
+#define FEATURES_AQ1_REV_B	(FEATURES_AQ1_REV_B0|FEATURES_AQ1_REV_B1)
+#define FEATURES_AQ1		(FEATURES_AQ1_REV_A|FEATURES_AQ1_REV_B)
+#define FEATURES_AQ2		0x10000000
+#define FEATURES_AQ2_IFACE_A0	0x20000000
+#define FEATURES_AQ2_IFACE_B0	0x40000000
+#define HWTYPE_AQ1_P(sc)	(((sc)->sc_features & FEATURES_AQ1) != 0)
+#define HWTYPE_AQ2_P(sc)	(((sc)->sc_features & FEATURES_AQ2) != 0)
 
-#define FW2X_SNPRINTB			\
-	"\177\020"			\
-	"b\x23" "PAUSE\0"		\
-	"b\x24" "ASYMMETRIC-PAUSE\0"	\
-	"b\x31" "CABLE-DIAG\0"		\
-	"b\x32" "TEMPERATURE\0"		\
-	"b\x33" "DOWNSHIFT\0"		\
-	"b\x34" "PTP-AVB\0"		\
-	"b\x35" "MEDIA-DETECT\0"	\
-	"b\x36" "LINK-DROP\0"		\
-	"b\x37" "SLEEP-PROXY\0"		\
-	"b\x38" "WOL\0"			\
-	"b\x39" "MAC-STOP\0"		\
-	"b\x3a" "EXT-LOOPBACK\0"	\
-	"b\x3b" "INT-LOOPBACK\0"	\
-	"b\x3c" "EFUSE-AGENT\0"		\
-	"b\x3d" "WOL-TIMER\0"		\
-	"b\x3e" "STATISTICS\0"		\
-	"b\x3f" "TRANSACTION-ID\0"	\
-	"\0"
+/* lock for firmware interface */
+#define AQ_MPI_LOCK(sc)		mtx_enter(&(sc)->sc_mpi_mutex);
+#define AQ_MPI_UNLOCK(sc)	mtx_leave(&(sc)->sc_mpi_mutex);
+
+#define FW2X_CTRL_10BASET_HD			(1 << 0)
+#define FW2X_CTRL_10BASET_FD			(1 << 1)
+#define FW2X_CTRL_100BASETX_HD			(1 << 2)
+#define FW2X_CTRL_100BASET4_HD			(1 << 3)
+#define FW2X_CTRL_100BASET2_HD			(1 << 4)
+#define FW2X_CTRL_100BASETX_FD			(1 << 5)
+#define FW2X_CTRL_100BASET2_FD			(1 << 6)
+#define FW2X_CTRL_1000BASET_HD			(1 << 7)
+#define FW2X_CTRL_1000BASET_FD			(1 << 8)
+#define FW2X_CTRL_2P5GBASET_FD			(1 << 9)
+#define FW2X_CTRL_5GBASET_FD			(1 << 10)
+#define FW2X_CTRL_10GBASET_FD			(1 << 11)
+#define FW2X_CTRL_RESERVED1			(1ULL << 32)
+#define FW2X_CTRL_10BASET_EEE			(1ULL << 33)
+#define FW2X_CTRL_RESERVED2			(1ULL << 34)
+#define FW2X_CTRL_PAUSE				(1ULL << 35)
+#define FW2X_CTRL_ASYMMETRIC_PAUSE		(1ULL << 36)
+#define FW2X_CTRL_100BASETX_EEE			(1ULL << 37)
+#define FW2X_CTRL_RESERVED3			(1ULL << 38)
+#define FW2X_CTRL_RESERVED4			(1ULL << 39)
+#define FW2X_CTRL_1000BASET_FD_EEE		(1ULL << 40)
+#define FW2X_CTRL_2P5GBASET_FD_EEE		(1ULL << 41)
+#define FW2X_CTRL_5GBASET_FD_EEE		(1ULL << 42)
+#define FW2X_CTRL_10GBASET_FD_EEE		(1ULL << 43)
+#define FW2X_CTRL_RESERVED5			(1ULL << 44)
+#define FW2X_CTRL_RESERVED6			(1ULL << 45)
+#define FW2X_CTRL_RESERVED7			(1ULL << 46)
+#define FW2X_CTRL_RESERVED8			(1ULL << 47)
+#define FW2X_CTRL_RESERVED9			(1ULL << 48)
+#define FW2X_CTRL_CABLE_DIAG			(1ULL << 49)
+#define FW2X_CTRL_TEMPERATURE			(1ULL << 50)
+#define FW2X_CTRL_DOWNSHIFT			(1ULL << 51)
+#define FW2X_CTRL_PTP_AVB_EN			(1ULL << 52)
+#define FW2X_CTRL_MEDIA_DETECT			(1ULL << 53)
+#define FW2X_CTRL_LINK_DROP			(1ULL << 54)
+#define FW2X_CTRL_SLEEP_PROXY			(1ULL << 55)
+#define FW2X_CTRL_WOL				(1ULL << 56)
+#define FW2X_CTRL_MAC_STOP			(1ULL << 57)
+#define FW2X_CTRL_EXT_LOOPBACK			(1ULL << 58)
+#define FW2X_CTRL_INT_LOOPBACK			(1ULL << 59)
+#define FW2X_CTRL_EFUSE_AGENT			(1ULL << 60)
+#define FW2X_CTRL_WOL_TIMER			(1ULL << 61)
+#define FW2X_CTRL_STATISTICS			(1ULL << 62)
+#define FW2X_CTRL_TRANSACTION_ID		(1ULL << 63)
 
 #define FW2X_CTRL_RATE_100M			FW2X_CTRL_100BASETX_FD
 #define FW2X_CTRL_RATE_1G			FW2X_CTRL_1000BASET_FD
@@ -997,68 +722,104 @@ typedef struct aq2_filter_caps {
 	 FW2X_CTRL_5GBASET_FD_EEE |	\
 	 FW2X_CTRL_10GBASET_FD_EEE)
 
-typedef enum aq_fw_bootloader_mode {
+enum aq_hwtype {
+	HWTYPE_AQ1,
+	HWTYPE_AQ2
+};
+
+enum aq_fw_bootloader_mode {
 	FW_BOOT_MODE_UNKNOWN = 0,
 	FW_BOOT_MODE_FLB,
 	FW_BOOT_MODE_RBL_FLASH,
 	FW_BOOT_MODE_RBL_HOST_BOOTLOAD
-} aq_fw_bootloader_mode_t;
+};
 
-#define AQ_WRITE_REG(sc, reg, val)				\
-	bus_space_write_4((sc)->sc_iot, (sc)->sc_ioh, (reg), (val))
+enum aq_media_type {
+	AQ_MEDIA_TYPE_UNKNOWN = 0,
+	AQ_MEDIA_TYPE_FIBRE,
+	AQ_MEDIA_TYPE_TP
+};
 
-#define AQ_READ_REG(sc, reg)					\
-	bus_space_read_4((sc)->sc_iot, (sc)->sc_ioh, (reg))
+enum aq_link_speed {
+	AQ_LINK_NONE    = 0,
+	AQ_LINK_10M	= (1 << 0),
+	AQ_LINK_100M    = (1 << 1),
+	AQ_LINK_1G      = (1 << 2),
+	AQ_LINK_2G5     = (1 << 3),
+	AQ_LINK_5G      = (1 << 4),
+	AQ_LINK_10G     = (1 << 5)
+};
 
-#define AQ_READ_REGS(sc, reg, p, cnt)	\
-	bus_space_read_region_4((sc)->sc_iot, (sc)->sc_ioh, (reg), (p), (cnt))
+#define AQ_LINK_ALL	(AQ_LINK_100M | AQ_LINK_1G | AQ_LINK_2G5 | \
+			    AQ_LINK_5G | AQ_LINK_10G )
+#define AQ_LINK_AUTO	AQ_LINK_ALL
 
-#define AQ_READ64_REG(sc, reg)					\
-	((uint64_t)AQ_READ_REG(sc, reg) |			\
-	(((uint64_t)AQ_READ_REG(sc, (reg) + 4)) << 32))
+enum aq_link_eee {
+	AQ_EEE_DISABLE = 0,
+	AQ_EEE_ENABLE = 1
+};
 
-#define AQ_WRITE64_REG(sc, reg, val)				\
-	do {							\
-		AQ_WRITE_REG(sc, reg, (uint32_t)val);		\
-		AQ_WRITE_REG(sc, reg + 4, (uint32_t)(val >> 32)); \
-	} while (/* CONSTCOND */0)
+enum aq_hw_fw_mpi_state {
+	MPI_DEINIT      = 0,
+	MPI_RESET       = 1,
+	MPI_INIT        = 2,
+	MPI_POWER       = 4
+};
 
-#define AQ_READ_REG_BIT(sc, reg, mask)				\
-	__SHIFTOUT(AQ_READ_REG(sc, reg), mask)
+enum aq_link_fc {
+        AQ_FC_NONE = 0,
+        AQ_FC_RX = (1 << 0),
+        AQ_FC_TX = (1 << 1),
+        AQ_FC_ALL = (AQ_FC_RX | AQ_FC_TX)
+};
 
-#define AQ_WRITE_REG_BIT(sc, reg, mask, val)			\
-	do {							\
-		uint32_t _v;					\
-		_v = AQ_READ_REG((sc), (reg));			\
-		_v &= ~(mask);					\
-		if ((val) != 0)					\
-			_v |= __SHIFTIN((val), (mask));		\
-		AQ_WRITE_REG((sc), (reg), _v);			\
-	} while (/* CONSTCOND */ 0)
+struct aq_dmamem {
+	bus_dmamap_t		aqm_map;
+	bus_dma_segment_t	aqm_seg;
+	int			aqm_nsegs;
+	size_t			aqm_size;
+	caddr_t			aqm_kva;
+};
 
-#define WAIT_FOR(expr, us, n, errp)				\
-	do {							\
-		unsigned int _n;				\
-		for (_n = n; (!(expr)) && _n != 0; --_n) {	\
-			delay((us));				\
-		}						\
-		if ((errp != NULL)) {				\
-			if (_n == 0)				\
-				*(errp) = ETIMEDOUT;		\
-			else					\
-				*(errp) = 0;			\
-		}						\
-	} while (/* CONSTCOND */ 0)
+#define AQ_DMA_MAP(_aqm)	((_aqm)->aqm_map)
+#define AQ_DMA_DVA(_aqm)	((_aqm)->aqm_map->dm_segs[0].ds_addr)
+#define AQ_DMA_KVA(_aqm)	((void *)(_aqm)->aqm_kva)
+#define AQ_DMA_LEN(_aqm)	((_aqm)->aqm_size)
 
-#define msec_delay(x)	DELAY(1000 * (x))
 
-typedef struct aq_mailbox_header {
-	uint32_t version;
-	uint32_t transaction_id;
-	int32_t error;
-} __packed __aligned(4) aq_mailbox_header_t;
+struct aq_mailbox_header {
+        uint32_t version;
+        uint32_t transaction_id;
+        int32_t error;
+} __packed __aligned(4);
 
-typedef struct aq_hw_stats_s {
+struct aq_hw_stats_s {
+        uint32_t uprc;
+        uint32_t mprc;
+        uint32_t bprc;
+        uint32_t erpt;
+        uint32_t uptc;
+        uint32_t mptc;
+        uint32_t bptc;
+        uint32_t erpr;
+        uint32_t mbtc;
+        uint32_t bbtc;
+        uint32_t mbrc;
+        uint32_t bbrc;
+        uint32_t ubrc;
+        uint32_t ubtc;
+        uint32_t ptc;
+        uint32_t prc;
+        uint32_t dpc;   /* not exists in fw2x_msm_statistics */
+        uint32_t cprc;  /* not exists in fw2x_msm_statistics */
+} __packed __aligned(4);
+
+struct aq_fw2x_capabilities {
+        uint32_t caps_lo;
+        uint32_t caps_hi;
+} __packed __aligned(4);
+
+struct aq_fw2x_msm_statistics {
 	uint32_t uprc;
 	uint32_t mprc;
 	uint32_t bprc;
@@ -1075,46 +836,15 @@ typedef struct aq_hw_stats_s {
 	uint32_t ubtc;
 	uint32_t ptc;
 	uint32_t prc;
-	uint32_t dpc;	/* not exists in fw2x_msm_statistics */
-	uint32_t cprc;	/* not exists in fw2x_msm_statistics */
-} __packed __aligned(4) aq_hw_stats_s_t;
+} __packed __aligned(4);
 
-typedef struct fw1x_mailbox {
-	aq_mailbox_header_t header;
-	aq_hw_stats_s_t msm;
-} __packed __aligned(4) fw1x_mailbox_t;
-
-typedef struct fw2x_msm_statistics {
-	uint32_t uprc;
-	uint32_t mprc;
-	uint32_t bprc;
-	uint32_t erpt;
-	uint32_t uptc;
-	uint32_t mptc;
-	uint32_t bptc;
-	uint32_t erpr;
-	uint32_t mbtc;
-	uint32_t bbtc;
-	uint32_t mbrc;
-	uint32_t bbrc;
-	uint32_t ubrc;
-	uint32_t ubtc;
-	uint32_t ptc;
-	uint32_t prc;
-} __packed __aligned(4) fw2x_msm_statistics_t;
-
-typedef struct fw2x_phy_cable_diag_data {
+struct aq_fw2x_phy_cable_diag_data {
 	uint32_t lane_data[4];
-} __packed __aligned(4) fw2x_phy_cable_diag_data_t;
+} __packed __aligned(4);
 
-typedef struct fw2x_capabilities {
-	uint32_t caps_lo;
-	uint32_t caps_hi;
-} __packed __aligned(4) fw2x_capabilities_t;
-
-typedef struct fw2x_mailbox {		/* struct fwHostInterface */
-	aq_mailbox_header_t header;
-	fw2x_msm_statistics_t msm;	/* msmStatistics_t msm; */
+struct aq_fw2x_mailbox {		/* struct fwHostInterface */
+	struct aq_mailbox_header header;
+	struct aq_fw2x_msm_statistics msm;	/* msmStatistics_t msm; */
 
 	uint32_t phy_info1;
 #define PHYINFO1_FAULT_CODE	__BITS(31,16)
@@ -1123,1213 +853,736 @@ typedef struct fw2x_mailbox {		/* struct fwHostInterface */
 #define PHYINFO2_TEMPERATURE	__BITS(15,0)
 #define PHYINFO2_CABLE_LEN	__BITS(23,16)
 
-	fw2x_phy_cable_diag_data_t diag_data;
+	struct aq_fw2x_phy_cable_diag_data diag_data;
 	uint32_t reserved[8];
 
-	fw2x_capabilities_t caps;
+	struct aq_fw2x_capabilities caps;
 
 	/* ... */
-} __packed __aligned(4) fw2x_mailbox_t;
-
-typedef enum aq_link_speed {
-	AQ_LINK_NONE	= 0,
-	AQ_LINK_10G	= __BIT(0),
-	AQ_LINK_5G	= __BIT(1),
-	AQ_LINK_2G5	= __BIT(2),
-	AQ_LINK_1G	= __BIT(3),
-	AQ_LINK_100M	= __BIT(4),
-	AQ_LINK_10M	= __BIT(5)
-} aq_link_speed_t;
-#define AQ_LINK_ALL	(AQ_LINK_100M | AQ_LINK_1G | AQ_LINK_2G5 | \
-			 AQ_LINK_5G | AQ_LINK_10G )
-#define AQ_LINK_AUTO	__BITS(31, 0)
-
-typedef enum aq_link_fc {
-	AQ_FC_NONE = 0,
-	AQ_FC_RX = __BIT(0),
-	AQ_FC_TX = __BIT(1),
-	AQ_FC_ALL = (AQ_FC_RX | AQ_FC_TX)
-} aq_link_fc_t;
-
-typedef enum aq_link_eee {
-	AQ_EEE_DISABLE = 0,
-	AQ_EEE_ENABLE = 1
-} aq_link_eee_t;
-
-typedef enum aq_hw_fw_mpi_state {
-	MPI_DEINIT	= 0,
-	MPI_RESET	= 1,
-	MPI_INIT	= 2,
-	MPI_POWER	= 4
-} aq_hw_fw_mpi_state_t;
-
-enum aq_media_type {
-	AQ_MEDIA_TYPE_UNKNOWN = 0,
-	AQ_MEDIA_TYPE_FIBRE,
-	AQ_MEDIA_TYPE_TP
-};
-
-struct aq_rx_desc_read {
-	uint64_t buf_addr;
-	uint64_t hdr_addr;
-} __packed __aligned(8);
-
-struct aq_rx_desc_wb {
-	uint32_t type;
-#define RXDESC_TYPE_RSSTYPE		__BITS(3,0)
-#define  RXDESC_TYPE_RSSTYPE_NONE		0
-#define  RXDESC_TYPE_RSSTYPE_IPV4		2
-#define  RXDESC_TYPE_RSSTYPE_IPV6		3
-#define  RXDESC_TYPE_RSSTYPE_IPV4_TCP		4
-#define  RXDESC_TYPE_RSSTYPE_IPV6_TCP		5
-#define  RXDESC_TYPE_RSSTYPE_IPV4_UDP		6
-#define  RXDESC_TYPE_RSSTYPE_IPV6_UDP		7
-#define RXDESC_TYPE_PKTTYPE_ETHER	__BITS(5,4)
-#define  RXDESC_TYPE_PKTTYPE_ETHER_IPV4		0
-#define  RXDESC_TYPE_PKTTYPE_ETHER_IPV6		1
-#define  RXDESC_TYPE_PKTTYPE_ETHER_OTHERS	2
-#define  RXDESC_TYPE_PKTTYPE_ETHER_ARP		3
-#define RXDESC_TYPE_PKTTYPE_PROTO	__BITS(8,6)
-#define  RXDESC_TYPE_PKTTYPE_PROTO_TCP		0
-#define  RXDESC_TYPE_PKTTYPE_PROTO_UDP		1
-#define  RXDESC_TYPE_PKTTYPE_PROTO_SCTP		2
-#define  RXDESC_TYPE_PKTTYPE_PROTO_ICMP		3
-#define  RXDESC_TYPE_PKTTYPE_PROTO_OTHERS	4
-#define RXDESC_TYPE_PKTTYPE_VLAN	__BIT(9)
-#define RXDESC_TYPE_PKTTYPE_VLAN_DOUBLE	__BIT(10)
-#define RXDESC_TYPE_MAC_DMA_ERR		__BIT(12)
-#define RXDESC_TYPE_RESERVED		__BITS(18,13)
-#define RXDESC_TYPE_IPV4_CSUM_CHECKED	__BIT(19)	/* PKTTYPE_ETHER_IPV4 */
-#define RXDESC_TYPE_TCPUDP_CSUM_CHECKED	__BIT(20)
-#define RXDESC_TYPE_SPH			__BIT(21)
-#define RXDESC_TYPE_HDR_LEN		__BITS(31,22)
-	uint32_t rss_hash;
-	uint16_t status;
-#define RXDESC_STATUS_DD		__BIT(0)
-#define RXDESC_STATUS_EOP		__BIT(1)
-#define RXDESC_STATUS_MACERR		__BIT(2)
-#define RXDESC_STATUS_IPV4_CSUM_NG	__BIT(3)
-#define RXDESC_STATUS_TCPUDP_CSUM_ERROR	__BIT(4)
-#define RXDESC_STATUS_TCPUDP_CSUM_OK	__BIT(5)
-
-#define RXDESC_STATUS_STAT		__BITS(2,5)
-#define RXDESC_STATUS_ESTAT		__BITS(6,11)
-#define RXDESC_STATUS_RSC_CNT		__BITS(12,15)
-	uint16_t pkt_len;
-	uint16_t next_desc_ptr;
-	uint16_t vlan;
 } __packed __aligned(4);
 
-typedef union aq_rx_desc {
-	struct aq_rx_desc_read read;
-	struct aq_rx_desc_wb wb;
-} __packed __aligned(8) aq_rx_desc_t;
+struct aq_rx_desc_read {
+	uint64_t		buf_addr;
+	uint64_t		hdr_addr;
+} __packed;
 
-typedef struct aq_tx_desc {
-	uint64_t buf_addr;
-	uint32_t ctl1;
-#define AQ_TXDESC_CTL1_TYPE_MASK	0x00000003
-#define AQ_TXDESC_CTL1_TYPE_TXD		0x00000001
-#define AQ_TXDESC_CTL1_TYPE_TXC		0x00000002
-#define AQ_TXDESC_CTL1_BLEN		__BITS(19,4)	/* TXD */
-#define AQ_TXDESC_CTL1_DD		__BIT(20)	/* TXD */
-#define AQ_TXDESC_CTL1_EOP		__BIT(21)	/* TXD */
-#define AQ_TXDESC_CTL1_CMD_VLAN		__BIT(22)	/* TXD */
-#define AQ_TXDESC_CTL1_CMD_FCS		__BIT(23)	/* TXD */
-#define AQ_TXDESC_CTL1_CMD_IP4CSUM	__BIT(24)	/* TXD */
-#define AQ_TXDESC_CTL1_CMD_L4CSUM	__BIT(25)	/* TXD */
-#define AQ_TXDESC_CTL1_CMD_LSO		__BIT(26)	/* TXD */
-#define AQ_TXDESC_CTL1_CMD_WB		__BIT(27)	/* TXD */
-#define AQ_TXDESC_CTL1_CMD_VXLAN	__BIT(28)	/* TXD */
-#define AQ_TXDESC_CTL1_VID		__BITS(15,4)	/* TXC */
-#define AQ_TXDESC_CTL1_LSO_IPV6		__BIT(21)	/* TXC */
-#define AQ_TXDESC_CTL1_LSO_TCP		__BIT(22)	/* TXC */
-	uint32_t ctl2;
-#define AQ_TXDESC_CTL2_LEN		__BITS(31,14)
-#define AQ_TXDESC_CTL2_CTX_EN		__BIT(13)
-#define AQ_TXDESC_CTL2_CTX_IDX		__BIT(12)
-} __packed __aligned(8) aq_tx_desc_t;
+struct aq_rx_desc_wb {
+	uint32_t		type;
+#define AQ_RXDESC_TYPE_RSSTYPE	0x000f
+#define AQ_RXDESC_TYPE_ETHER	0x0030
+#define AQ_RXDESC_TYPE_PROTO	0x01c0
+#define AQ_RXDESC_TYPE_VLAN	(1 << 9)
+#define AQ_RXDESC_TYPE_VLAN2	(1 << 10)
+#define AQ_RXDESC_TYPE_DMA_ERR	(1 << 12)
+#define AQ_RXDESC_TYPE_V4_SUM	(1 << 19)
+#define AQ_RXDESC_TYPE_L4_SUM	(1 << 20)
+	uint32_t		rss_hash;
+	uint16_t		status;
+#define AQ_RXDESC_STATUS_DD	(1 << 0)
+#define AQ_RXDESC_STATUS_EOP	(1 << 1)
+#define AQ_RXDESC_STATUS_MACERR (1 << 2)
+#define AQ_RXDESC_STATUS_V4_SUM_NG (1 << 3)
+#define AQ_RXDESC_STATUS_L4_SUM_ERR (1 << 4)
+#define AQ_RXDESC_STATUS_L4_SUM_OK (1 << 5)
+	uint16_t		pkt_len;
+	uint16_t		next_desc_ptr;
+	uint16_t		vlan;
+} __packed;
 
-struct aq_txring {
-	struct aq_softc *txr_sc;
-	int txr_index;
-	kmutex_t txr_mutex;
-	bool txr_active;
-	bool txr_stopping;
-	bool txr_sending;
-	time_t txr_lastsent;
+struct aq_tx_desc {
+	uint64_t		buf_addr;
+	uint32_t		ctl1;
+#define AQ_TXDESC_CTL1_TYPE_TXD	0x00000001
+#define AQ_TXDESC_CTL1_TYPE_TXC	0x00000002
+#define AQ_TXDESC_CTL1_BLEN_SHIFT 4
+#define AQ_TXDESC_CTL1_VLAN_SHIFT 4
+#define AQ_TXDESC_CTL1_DD	(1 << 20)
+#define AQ_TXDESC_CTL1_CMD_EOP	(1 << 21)
+#define AQ_TXDESC_CTL1_CMD_VLAN	(1 << 22)
+#define AQ_TXDESC_CTL1_CMD_FCS	(1 << 23)
+#define AQ_TXDESC_CTL1_CMD_IP4CSUM (1 << 24)
+#define AQ_TXDESC_CTL1_CMD_L4CSUM (1 << 25)
+#define AQ_TXDESC_CTL1_CMD_WB	(1 << 27)
 
-	pcq_t *txr_pcq;
-	void *txr_softint;
+#define AQ_TXDESC_CTL1_VID_SHIFT 4
+	uint32_t		ctl2;
+#define AQ_TXDESC_CTL2_LEN_SHIFT 14
+#define AQ_TXDESC_CTL2_CTX_EN	(1 << 13)
+} __packed;
 
-	aq_tx_desc_t *txr_txdesc;	/* aq_tx_desc_t[AQ_TXD_NUM] */
-	bus_dmamap_t txr_txdesc_dmamap;
-	bus_dma_segment_t txr_txdesc_seg[1];
-	bus_size_t txr_txdesc_size;
-
-	struct {
-		struct mbuf *m;
-		bus_dmamap_t dmamap;
-	} txr_mbufs[AQ_TXD_NUM];
-	unsigned int txr_prodidx;
-	unsigned int txr_considx;
-	int txr_nfree;
+struct aq_slot {
+	bus_dmamap_t		 as_map;
+	struct mbuf		*as_m;
 };
 
 struct aq_rxring {
-	struct aq_softc *rxr_sc;
-	int rxr_index;
-	kmutex_t rxr_mutex;
-	bool rxr_active;
-	bool rxr_discarding;
-	bool rxr_stopping;
-	struct mbuf *rxr_receiving_m;		/* receiving jumboframe */
-	struct mbuf *rxr_receiving_m_last;	/* last mbuf of jumboframe */
+	struct ifiqueue		*rx_ifiq;
+	struct aq_dmamem	 rx_mem;
+	struct aq_slot		*rx_slots;
+	int			 rx_q;
+	int			 rx_irq;
 
-	aq_rx_desc_t *rxr_rxdesc;	/* aq_rx_desc_t[AQ_RXD_NUM] */
-	bus_dmamap_t rxr_rxdesc_dmamap;
-	bus_dma_segment_t rxr_rxdesc_seg[1];
-	bus_size_t rxr_rxdesc_size;
-	struct {
-		struct mbuf *m;
-		bus_dmamap_t dmamap;
-	} rxr_mbufs[AQ_RXD_NUM];
-	unsigned int rxr_readidx;
+	struct timeout		 rx_refill;
+	struct if_rxring	 rx_rxr;
+	uint32_t		 rx_prod;
+	uint32_t		 rx_cons;
+
+	struct mbuf		*rx_m_head;
+	struct mbuf		**rx_m_tail;
+	int			 rx_m_error;
 };
 
-struct aq_queue {
-	struct aq_softc *sc;
-	struct aq_txring txring;
-	struct aq_rxring rxring;
+struct aq_txring {
+	struct ifqueue		*tx_ifq;
+	struct aq_dmamem	 tx_mem;
+	struct aq_slot		*tx_slots;
+	int			 tx_q;
+	int			 tx_irq;
+	uint32_t		 tx_prod;
+	uint32_t		 tx_cons;
 };
+
+struct aq_queues {
+	char			 q_name[16];
+	void			*q_ihc;
+	struct aq_softc		*q_sc;
+	int			 q_index;
+	struct aq_rxring 	 q_rx;
+	struct aq_txring 	 q_tx;
+};
+
 
 struct aq_softc;
 struct aq_firmware_ops {
 	int (*reset)(struct aq_softc *);
 	int (*get_mac_addr)(struct aq_softc *);
-	int (*set_mode)(struct aq_softc *, aq_hw_fw_mpi_state_t,
-	    aq_link_speed_t, aq_link_fc_t, aq_link_eee_t);
-	int (*get_mode)(struct aq_softc *, aq_hw_fw_mpi_state_t *,
-	    aq_link_speed_t *, aq_link_fc_t *, aq_link_eee_t *);
-	int (*get_stats)(struct aq_softc *, aq_hw_stats_s_t *);
-// #if NSYSMON_ENVSYS > 0
-// 	int (*get_temperature)(struct aq_softc *, uint32_t *);
-// #endif
+	int (*set_mode)(struct aq_softc *, enum aq_hw_fw_mpi_state,
+	    enum aq_link_speed, enum aq_link_fc, enum aq_link_eee);
+	int (*get_mode)(struct aq_softc *, enum aq_hw_fw_mpi_state *,
+	    enum aq_link_speed *, enum aq_link_fc *, enum aq_link_eee *);
+	int (*get_stats)(struct aq_softc *, struct aq_hw_stats_s *);
 };
-
-#ifdef AQ_EVENT_COUNTERS
-#define AQ_EVCNT_DECL(name)						\
-	char sc_evcount_##name##_name[32];				\
-	struct evcnt sc_evcount_##name##_ev;
-#define AQ_EVCNT_ATTACH(sc, name, desc, evtype)				\
-	do {								\
-		snprintf((sc)->sc_evcount_##name##_name,		\
-		    sizeof((sc)->sc_evcount_##name##_name),		\
-		    "%s", desc);					\
-		evcnt_attach_dynamic(&(sc)->sc_evcount_##name##_ev,	\
-		    (evtype), NULL, device_xname((sc)->sc_dev),		\
-		    (sc)->sc_evcount_##name##_name);			\
-	} while (/*CONSTCOND*/0)
-#define AQ_EVCNT_ATTACH_MISC(sc, name, desc)				\
-	AQ_EVCNT_ATTACH(sc, name, desc, EVCNT_TYPE_MISC)
-#define AQ_EVCNT_DETACH(sc, name)					\
-	if ((sc)->sc_evcount_##name##_name[0] != '\0')			\
-		evcnt_detach(&(sc)->sc_evcount_##name##_ev)
-#define AQ_EVCNT_ADD(sc, name, val)					\
-	((sc)->sc_evcount_##name##_ev.ev_count += (val))
-#endif /* AQ_EVENT_COUNTERS */
-
-#define AQ_LOCK(sc)		mutex_enter(&(sc)->sc_mutex);
-#define AQ_UNLOCK(sc)		mutex_exit(&(sc)->sc_mutex);
-#define AQ_LOCKED(sc)		KASSERT(mutex_owned(&(sc)->sc_mutex));
-
-/* lock for firmware interface */
-#define AQ_MPI_LOCK(sc)		mutex_enter(&(sc)->sc_mpi_mutex);
-#define AQ_MPI_UNLOCK(sc)	mutex_exit(&(sc)->sc_mpi_mutex);
-#define AQ_MPI_LOCKED(sc)	KASSERT(mutex_owned(&(sc)->sc_mpi_mutex));
-
 
 struct aq_softc {
-	device_t sc_dev;
+	struct device		sc_dev;
+	uint16_t		sc_product;
+	uint16_t		sc_revision;
+	bus_dma_tag_t		sc_dmat;
+	pci_chipset_tag_t	sc_pc;
+	pcitag_t		sc_pcitag;
+	int			sc_nqueues;
+	struct aq_queues	sc_queues[AQ_MAXQ];
+	struct intrmap		*sc_intrmap;
+	void			*sc_ih;
+	bus_space_handle_t	sc_ioh;
+	bus_space_tag_t		sc_iot;
 
-	bus_space_tag_t sc_iot;
-	bus_space_handle_t sc_ioh;
-	bus_size_t sc_iosize;
-	bus_dma_tag_t sc_dmat;
+	uint32_t		sc_mbox_addr;
+	int			sc_rbl_enabled;
+	int			sc_fast_start_enabled;
+	int			sc_flash_present;
+	int			sc_art_filter_base_index;
+	uint32_t		sc_fw_version;
+	const struct		aq_firmware_ops *sc_fw_ops;
+	uint64_t		sc_fw_caps;
+	enum aq_media_type	sc_media_type;
+	enum aq_link_speed	sc_available_rates;
+	uint32_t		sc_features;
+	int			sc_linkstat_irq;
+	struct arpcom		sc_arpcom;
+	struct ifmedia		sc_media;
 
-	void *sc_ihs[AQ_NINTR_MAX];
-	pci_intr_handle_t *sc_intrs;
-
-	int sc_tx_irq[AQ_RSSQUEUE_MAX];
-	int sc_rx_irq[AQ_RSSQUEUE_MAX];
-	int sc_linkstat_irq;
-	bool sc_use_txrx_independent_intr;
-	bool sc_no_link_intr;
-
-// #if NSYSMON_ENVSYS > 0
-// 	struct sysmon_envsys *sc_sme;
-// 	envsys_data_t sc_sensor_temp;
-// #endif
-
-	callout_t sc_tick_ch;
-
-	int sc_nintrs;
-	bool sc_msix;
-
-	struct aq_queue sc_queue[AQ_RSSQUEUE_MAX];
-	int sc_nqueues;
-	uint32_t sc_tc_mode;	/* traffic class mode (4 or 8) */
-	uint32_t sc_tcs;	/* traffic class num */
-
-	pci_chipset_tag_t sc_pc;
-	pcitag_t sc_pcitag;
-	uint16_t sc_product;
-	uint16_t sc_revision;
-
-	kmutex_t sc_mutex;
-	kmutex_t sc_mpi_mutex;
-
-	const struct aq_firmware_ops *sc_fw_ops;
-	uint64_t sc_fw_caps;			/* AQ1 */
-	aq2_filter_caps_t sc_filter_caps;	/* AQ2 */
-	uint32_t sc_filter_art_base_index;	/* AQ2 */
-	enum aq_media_type sc_media_type;
-	aq_link_speed_t sc_available_rates;
-
-	aq_link_speed_t sc_link_rate;
-	aq_link_fc_t sc_link_fc;
-	aq_link_eee_t sc_link_eee;
-
-	uint32_t sc_fw_version;
-#define FW_VERSION_MAJOR(sc)	(((sc)->sc_fw_version >> 24) & 0xff)
-#define FW_VERSION_MINOR(sc)	(((sc)->sc_fw_version >> 16) & 0xff)
-#define FW_VERSION_BUILD(sc)	((sc)->sc_fw_version & 0xffff)
-	uint32_t sc_features;
-#define FEATURES_MIPS		0x00000001
-#define FEATURES_TPO2		0x00000002
-#define FEATURES_RPF2		0x00000004
-#define FEATURES_MPI_AQ		0x00000008
-#define FEATURES_AQ1_REV_A0	0x01000000
-#define FEATURES_AQ1_REV_A	(FEATURES_AQ1_REV_A0)
-#define FEATURES_AQ1_REV_B0	0x02000000
-#define FEATURES_AQ1_REV_B1	0x04000000
-#define FEATURES_AQ1_REV_B	(FEATURES_AQ1_REV_B0 | FEATURES_AQ1_REV_B1)
-#define FEATURES_AQ1		(FEATURES_AQ1_REV_A | FEATURES_AQ1_REV_B)
-#define FEATURES_AQ2		0x10000000
-#define FEATURES_AQ2_IFACE_A0	0x20000000
-#define FEATURES_AQ2_IFACE_B0	0x40000000
-#define HWTYPE_AQ1_P(sc)	(((sc)->sc_features & FEATURES_AQ1) != 0)
-#define HWTYPE_AQ2_P(sc)	(((sc)->sc_features & FEATURES_AQ2) != 0)
-
-	int sc_max_mtu;
-	uint32_t sc_mbox_addr;
-
-	bool sc_rbl_enabled;
-	bool sc_fast_start_enabled;
-	bool sc_flash_present;
-
-	bool sc_intr_moderation_enable;
-	bool sc_rss_enable;
-
-	struct ethercom sc_ethercom;
-	struct ether_addr sc_enaddr;
-	struct ifmedia sc_media;
-	int sc_ec_capenable;		/* last ec_capenable */
-	unsigned short sc_if_flags;	/* last if_flags */
-
-	bool sc_tx_sending;
-	bool sc_stopping;
-
-	struct workqueue *sc_reset_wq;
-	struct work sc_reset_work;
-	volatile unsigned sc_reset_pending;
-
-	bool sc_trigger_reset;
-
-#ifdef AQ_EVENT_COUNTERS
-	aq_hw_stats_s_t sc_statistics[2];
-	int sc_statistics_idx;
-	bool sc_poll_statistics;
-
-	AQ_EVCNT_DECL(uprc);
-	AQ_EVCNT_DECL(mprc);
-	AQ_EVCNT_DECL(bprc);
-	AQ_EVCNT_DECL(erpt);
-	AQ_EVCNT_DECL(uptc);
-	AQ_EVCNT_DECL(mptc);
-	AQ_EVCNT_DECL(bptc);
-	AQ_EVCNT_DECL(erpr);
-	AQ_EVCNT_DECL(mbtc);
-	AQ_EVCNT_DECL(bbtc);
-	AQ_EVCNT_DECL(mbrc);
-	AQ_EVCNT_DECL(bbrc);
-	AQ_EVCNT_DECL(ubrc);
-	AQ_EVCNT_DECL(ubtc);
-	AQ_EVCNT_DECL(ptc);
-	AQ_EVCNT_DECL(prc);
-	AQ_EVCNT_DECL(dpc);
-	AQ_EVCNT_DECL(cprc);
-#endif
+	struct ether_addr	sc_enaddr;
+	struct mutex		sc_mpi_mutex;
 };
 
-static int aq_match(device_t, cfdata_t, void *);
-static void aq_attach(device_t, device_t, void *);
-static int aq_detach(device_t, int);
+const struct pci_matchid aq_devices[] = {
+	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC100 },
+	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC107 },
+	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC108 },
+	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC109 },
+	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC111 },
+	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC112 },
+	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC113 },
+	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC113C },
+	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC113CA },
+	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC113CS },
+	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC114CS },
+	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC115C },
+	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC116C },
+	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC100S },
+	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC107S },
+	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC108S },
+	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC109S },
+	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC111S },
+	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC112S },
+	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_D100 },
+	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_D107 },
+	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_D108 },
+	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_D109 },
+};
 
-static int aq_setup_msix(struct aq_softc *, struct pci_attach_args *);
-static int aq_setup_legacy(struct aq_softc *, struct pci_attach_args *,
-    pci_intr_type_t);
+const struct aq_product {
+	pci_vendor_id_t aq_vendor;
+	pci_product_id_t aq_product;
+	enum aq_hwtype aq_hwtype;
+	enum aq_media_type aq_media_type;
+	enum aq_link_speed aq_available_rates;
+} aq_products[] = {
+{	PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC100, HWTYPE_AQ1,
+	AQ_MEDIA_TYPE_FIBRE, AQ_LINK_ALL
+},
+{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC107, HWTYPE_AQ1,
+	AQ_MEDIA_TYPE_TP, AQ_LINK_ALL
+},
+{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC108, HWTYPE_AQ1,
+	AQ_MEDIA_TYPE_TP, AQ_LINK_100M | AQ_LINK_1G | AQ_LINK_2G5 | AQ_LINK_5G
+},
+{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC109, HWTYPE_AQ1,
+	AQ_MEDIA_TYPE_TP, AQ_LINK_100M | AQ_LINK_1G | AQ_LINK_2G5
+},
+{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC111, HWTYPE_AQ1,
+	AQ_MEDIA_TYPE_TP, AQ_LINK_100M | AQ_LINK_1G | AQ_LINK_2G5 | AQ_LINK_5G
+},
+{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC112, HWTYPE_AQ1,
+	AQ_MEDIA_TYPE_TP, AQ_LINK_100M | AQ_LINK_1G | AQ_LINK_2G5
+},
+{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC100S, HWTYPE_AQ1,
+	AQ_MEDIA_TYPE_FIBRE, AQ_LINK_ALL
+},
+{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC107S, HWTYPE_AQ1,
+	AQ_MEDIA_TYPE_TP, AQ_LINK_ALL
+},
+{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC108S, HWTYPE_AQ1,
+	AQ_MEDIA_TYPE_TP, AQ_LINK_100M | AQ_LINK_1G | AQ_LINK_2G5 | AQ_LINK_5G
+},
+{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC109S, HWTYPE_AQ1,
+	AQ_MEDIA_TYPE_TP, AQ_LINK_100M | AQ_LINK_1G | AQ_LINK_2G5
+},
+{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC111S, HWTYPE_AQ1,
+	AQ_MEDIA_TYPE_TP, AQ_LINK_100M | AQ_LINK_1G | AQ_LINK_2G5 | AQ_LINK_5G
+},
+{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC112S, HWTYPE_AQ1,
+	AQ_MEDIA_TYPE_TP, AQ_LINK_100M | AQ_LINK_1G | AQ_LINK_2G5
+},
+{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_D100, HWTYPE_AQ1,
+	AQ_MEDIA_TYPE_FIBRE, AQ_LINK_ALL
+},
+{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_D107, HWTYPE_AQ1,
+	AQ_MEDIA_TYPE_TP, AQ_LINK_ALL
+},
+{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_D108, HWTYPE_AQ1,
+	AQ_MEDIA_TYPE_TP, AQ_LINK_100M | AQ_LINK_1G | AQ_LINK_2G5 | AQ_LINK_5G
+},
+{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_D109, HWTYPE_AQ1,
+	AQ_MEDIA_TYPE_TP, AQ_LINK_100M | AQ_LINK_1G | AQ_LINK_2G5
+},
 
-static int aq_ifmedia_change(struct ifnet * const);
-static void aq_ifmedia_status(struct ifnet * const, struct ifmediareq *);
-static int aq_vlan_cb(struct ethercom *ec, uint16_t vid, bool set);
-static int aq_ifflags_cb(struct ethercom *);
-static int aq_init(struct ifnet *);
-static int aq_init_locked(struct ifnet *);
-static void aq_send_common_locked(struct ifnet *, struct aq_softc *,
-    struct aq_txring *, bool);
-static int aq_transmit(struct ifnet *, struct mbuf *);
-static void aq_deferred_transmit(void *);
-static void aq_start(struct ifnet *);
-static void aq_stop(struct ifnet *, int);
-static void aq_stop_locked(struct ifnet *, bool);
-static int aq_ioctl(struct ifnet *, unsigned long, void *);
+{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC113, HWTYPE_AQ2,
+	AQ_MEDIA_TYPE_TP, AQ_LINK_ALL | AQ_LINK_10M
+},
+{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC113C, HWTYPE_AQ2,
+	AQ_MEDIA_TYPE_TP, AQ_LINK_ALL | AQ_LINK_10M
+},
+{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC113CA, HWTYPE_AQ2,
+	AQ_MEDIA_TYPE_TP, AQ_LINK_ALL | AQ_LINK_10M
+},
+{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC113CS, HWTYPE_AQ2,
+	AQ_MEDIA_TYPE_TP, AQ_LINK_ALL | AQ_LINK_10M
+},
+{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC114CS, HWTYPE_AQ2,
+	AQ_MEDIA_TYPE_TP,
+	AQ_LINK_10M | AQ_LINK_100M | AQ_LINK_1G | AQ_LINK_2G5 | AQ_LINK_5G
+},
+{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC115C, HWTYPE_AQ2,
+	AQ_MEDIA_TYPE_TP,
+	AQ_LINK_10M | AQ_LINK_100M | AQ_LINK_1G | AQ_LINK_2G5
+},
+{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC116C, HWTYPE_AQ2,
+	AQ_MEDIA_TYPE_TP, AQ_LINK_10M | AQ_LINK_100M | AQ_LINK_1G
+},
+};
 
-static int aq_txrx_rings_alloc(struct aq_softc *);
-static void aq_txrx_rings_free(struct aq_softc *);
-static int aq_tx_pcq_alloc(struct aq_softc *, struct aq_txring *);
-static void aq_tx_pcq_free(struct aq_softc *, struct aq_txring *);
+int	aq_match(struct device *, void *, void *);
+void	aq_attach(struct device *, struct device *, void *);
+int	aq_activate(struct device *, int);
+int	aq_intr(void *);
+int	aq_intr_link(void *);
+int	aq_intr_queue(void *);
+int	aq_init_rss(struct aq_softc *);
+int	aq_hw_reset(struct aq_softc *);
+int	aq_hw_init(struct aq_softc *, int, int);
+void	aq_hw_qos_set(struct aq_softc *);
+void	aq_hw_init_tx_path(struct aq_softc *);
+void	aq_hw_init_rx_path(struct aq_softc *);
+int	aq_set_mac_addr(struct aq_softc *, int, uint8_t *);
+int	aq_set_linkmode(struct aq_softc *, enum aq_link_speed,
+    enum aq_link_fc, enum aq_link_eee);
+void	aq_watchdog(struct ifnet *);
+void	aq_enable_intr(struct aq_softc *, int, int);
+int	aq_rxrinfo(struct aq_softc *, struct if_rxrinfo *);
+int	aq_ioctl(struct ifnet *, u_long, caddr_t);
+int	aq_up(struct aq_softc *);
+void	aq_down(struct aq_softc *);
+void	aq_iff(struct aq_softc *);
+void	aq_start(struct ifqueue *);
+void	aq_ifmedia_status(struct ifnet *, struct ifmediareq *);
+int	aq_ifmedia_change(struct ifnet *);
+void	aq_update_link_status(struct aq_softc *);
 
-static void aq_initmedia(struct aq_softc *);
-static void aq_enable_intr(struct aq_softc *, bool, bool);
+int	aq1_fw_reboot(struct aq_softc *);
+int	aq1_fw_read_version(struct aq_softc *);
+int	aq1_fw_version_init(struct aq_softc *);
+int	aq1_hw_init_ucp(struct aq_softc *);
+void	aq1_global_software_reset(struct aq_softc *);
+int	aq1_mac_soft_reset(struct aq_softc *, enum aq_fw_bootloader_mode *);
+int	aq1_mac_soft_reset_rbl(struct aq_softc *, enum aq_fw_bootloader_mode *);
+int	aq1_mac_soft_reset_flb(struct aq_softc *);
+int	aq1_fw_downld_dwords(struct aq_softc *, uint32_t, uint32_t *, uint32_t);
 
-static void aq_handle_reset_work(struct work *, void *);
-static void aq_unset_stopping_flags(struct aq_softc *);
-static void aq_set_stopping_flags(struct aq_softc *);
+int	aq2_interface_buffer_read(struct aq_softc *, uint32_t, uint32_t *,
+	    uint32_t);
+int	aq2_fw_reboot(struct aq_softc *);
+int	aq2_filter_art_set(struct aq_softc *, uint32_t, uint32_t, uint32_t,
+	    uint32_t action);
 
-// #if NSYSMON_ENVSYS > 0
-// static void aq_temp_refresh(struct sysmon_envsys *, envsys_data_t *);
-// #endif
-static void aq_tick(void *);
-static int aq_legacy_intr(void *);
-static int aq_link_intr(void *);
-static int aq_txrx_intr(void *);
-static int aq_tx_intr(void *);
-static int aq_rx_intr(void *);
+void	aq_refill(void *);
+int	aq_rx_fill(struct aq_softc *, struct aq_rxring *);
+static inline unsigned int aq_rx_fill_slots(struct aq_softc *,
+	    struct aq_rxring *, uint);
 
-static int aq_set_linkmode(struct aq_softc *, aq_link_speed_t, aq_link_fc_t,
-    aq_link_eee_t);
-static int aq_get_linkmode(struct aq_softc *, aq_link_speed_t *, aq_link_fc_t *,
-    aq_link_eee_t *);
+int	aq_dmamem_alloc(struct aq_softc *, struct aq_dmamem *,
+	    bus_size_t, u_int);
+void	aq_dmamem_free(struct aq_softc *, struct aq_dmamem *);
 
-static int aq1_fw_reboot(struct aq_softc *);
-static int aq1_fw_version_init(struct aq_softc *);
-static int aq_hw_init(struct aq_softc *);
-static int aq1_hw_init_ucp(struct aq_softc *);
-static int aq_hw_reset(struct aq_softc *);
-static int aq1_fw_downld_dwords(struct aq_softc *, uint32_t, uint32_t *,
-    uint32_t);
-static int aq1_get_mac_addr(struct aq_softc *);
-static int aq_init_rss(struct aq_softc *);
-static int aq_set_capability(struct aq_softc *);
+int	aq1_get_mac_addr(struct aq_softc *);
 
-static int fw1x_reset(struct aq_softc *);
-static int fw1x_set_mode(struct aq_softc *, aq_hw_fw_mpi_state_t,
-    aq_link_speed_t, aq_link_fc_t, aq_link_eee_t);
-static int fw1x_get_mode(struct aq_softc *, aq_hw_fw_mpi_state_t *,
-    aq_link_speed_t *, aq_link_fc_t *, aq_link_eee_t *);
-static int fw1x_get_stats(struct aq_softc *, aq_hw_stats_s_t *);
+int	aq_fw1x_reset(struct aq_softc *);
+int	aq_fw1x_get_mode(struct aq_softc *, enum aq_hw_fw_mpi_state *,
+    enum aq_link_speed *, enum aq_link_fc *, enum aq_link_eee *);
+int	aq_fw1x_set_mode(struct aq_softc *, enum aq_hw_fw_mpi_state,
+    enum aq_link_speed, enum aq_link_fc, enum aq_link_eee);
+int	aq_fw1x_get_stats(struct aq_softc *, struct aq_hw_stats_s *);
 
-static int fw2x_reset(struct aq_softc *);
-static int fw2x_set_mode(struct aq_softc *, aq_hw_fw_mpi_state_t,
-    aq_link_speed_t, aq_link_fc_t, aq_link_eee_t);
-static int fw2x_get_mode(struct aq_softc *, aq_hw_fw_mpi_state_t *,
-    aq_link_speed_t *, aq_link_fc_t *, aq_link_eee_t *);
-static int fw2x_get_stats(struct aq_softc *, aq_hw_stats_s_t *);
-// #if NSYSMON_ENVSYS > 0
-// static int fw2x_get_temperature(struct aq_softc *, uint32_t *);
-// #endif
+int	aq_fw2x_reset(struct aq_softc *);
+int	aq_fw2x_get_mode(struct aq_softc *, enum aq_hw_fw_mpi_state *,
+    enum aq_link_speed *, enum aq_link_fc *, enum aq_link_eee *);
+int	aq_fw2x_set_mode(struct aq_softc *, enum aq_hw_fw_mpi_state,
+    enum aq_link_speed, enum aq_link_fc, enum aq_link_eee);
+int	aq_fw2x_get_stats(struct aq_softc *, struct aq_hw_stats_s *);
 
-#ifndef AQ_WATCHDOG_TIMEOUT
-#define AQ_WATCHDOG_TIMEOUT 5
-#endif
-static int aq_watchdog_timeout = AQ_WATCHDOG_TIMEOUT;
+int	aq2_fw_reset(struct aq_softc *);
+int	aq2_get_mac_addr(struct aq_softc *);
+int	aq2_fw_get_mode(struct aq_softc *, enum aq_hw_fw_mpi_state *,
+	    enum aq_link_speed *, enum aq_link_fc *, enum aq_link_eee *);
+int	aq2_fw_set_mode(struct aq_softc *, enum aq_hw_fw_mpi_state,
+	    enum aq_link_speed, enum aq_link_fc, enum aq_link_eee);
+int	aq2_fw_get_stats(struct aq_softc *, struct aq_hw_stats_s *);
 
-static int aq2_fw_reboot(struct aq_softc *);
-static int aq2_fw_reset(struct aq_softc *);
-static int aq2_get_mac_addr(struct aq_softc *);
-static int aq2_fw_set_mode(struct aq_softc *, aq_hw_fw_mpi_state_t,
-    aq_link_speed_t, aq_link_fc_t, aq_link_eee_t);
-static int aq2_fw_get_mode(struct aq_softc *, aq_hw_fw_mpi_state_t *,
-    aq_link_speed_t *, aq_link_fc_t *, aq_link_eee_t *);
-static int aq2_init_filter(struct aq_softc *);
-static int aq2_filter_art_set(struct aq_softc *, uint32_t, uint32_t, uint32_t,
-    uint32_t);
-static int aq2_fw_get_stats(struct aq_softc *, aq_hw_stats_s_t *);
-// #if NSYSMON_ENVSYS > 0
-// static int aq2_fw_get_temperature(struct aq_softc *, uint32_t *);
-// #endif
-
-static const struct aq_firmware_ops aq_fw1x_ops = {
-	.reset = fw1x_reset,
+const struct aq_firmware_ops aq_fw1x_ops = {
+	.reset = aq_fw1x_reset,
 	.get_mac_addr = aq1_get_mac_addr,
-	.set_mode = fw1x_set_mode,
-	.get_mode = fw1x_get_mode,
-	.get_stats = fw1x_get_stats,
-// #if NSYSMON_ENVSYS > 0
-// 	.get_temperature = NULL
-// #endif
+	.set_mode = aq_fw1x_set_mode,
+	.get_mode = aq_fw1x_get_mode,
+	.get_stats = aq_fw1x_get_stats,
 };
 
-static const struct aq_firmware_ops aq_fw2x_ops = {
-	.reset = fw2x_reset,
+const struct aq_firmware_ops aq_fw2x_ops = {
+	.reset = aq_fw2x_reset,
 	.get_mac_addr = aq1_get_mac_addr,
-	.set_mode = fw2x_set_mode,
-	.get_mode = fw2x_get_mode,
-	.get_stats = fw2x_get_stats,
-// #if NSYSMON_ENVSYS > 0
-// 	.get_temperature = fw2x_get_temperature
-// #endif
+	.set_mode = aq_fw2x_set_mode,
+	.get_mode = aq_fw2x_get_mode,
+	.get_stats = aq_fw2x_get_stats,
 };
 
-static const struct aq_firmware_ops aq2_fw_ops = {
+const struct aq_firmware_ops aq2_fw_ops = {
 	.reset = aq2_fw_reset,
 	.get_mac_addr = aq2_get_mac_addr,
 	.set_mode = aq2_fw_set_mode,
 	.get_mode = aq2_fw_get_mode,
-	.get_stats = aq2_fw_get_stats,
-// #if NSYSMON_ENVSYS > 0
-// 	.get_temperature = aq2_fw_get_temperature
-// #endif
+	.get_stats = aq2_fw_get_stats
 };
 
-CFATTACH_DECL3_NEW(aq, sizeof(struct aq_softc),
-    aq_match, aq_attach, aq_detach, NULL, NULL, NULL, DVF_DETACH_SHUTDOWN);
-
-static const struct aq_product {
-	pci_vendor_id_t aq_vendor;
-	pci_product_id_t aq_product;
-	const char *aq_name;
-	enum aq_hwtype aq_hwtype;
-	enum aq_media_type aq_media_type;
-	aq_link_speed_t aq_available_rates;
-} aq_products[] = {
-	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC100,
-	  "Aquantia AQC100 10 Gigabit Network Adapter", HWTYPE_AQ1,
-	  AQ_MEDIA_TYPE_FIBRE, AQ_LINK_ALL
-	},
-	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC107,
-	  "Aquantia AQC107 10 Gigabit Network Adapter", HWTYPE_AQ1,
-	  AQ_MEDIA_TYPE_TP, AQ_LINK_ALL
-	},
-	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC108,
-	  "Aquantia AQC108 5 Gigabit Network Adapter", HWTYPE_AQ1,
-	  AQ_MEDIA_TYPE_TP, AQ_LINK_100M | AQ_LINK_1G | AQ_LINK_2G5 | AQ_LINK_5G
-	},
-	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC109,
-	  "Aquantia AQC109 2.5 Gigabit Network Adapter", HWTYPE_AQ1,
-	  AQ_MEDIA_TYPE_TP, AQ_LINK_100M | AQ_LINK_1G | AQ_LINK_2G5
-	},
-	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC111,
-	  "Aquantia AQC111 5 Gigabit Network Adapter", HWTYPE_AQ1,
-	  AQ_MEDIA_TYPE_TP, AQ_LINK_100M | AQ_LINK_1G | AQ_LINK_2G5 | AQ_LINK_5G
-	},
-	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC112,
-	  "Aquantia AQC112 2.5 Gigabit Network Adapter", HWTYPE_AQ1,
-	  AQ_MEDIA_TYPE_TP, AQ_LINK_100M | AQ_LINK_1G | AQ_LINK_2G5
-	},
-	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC100S,
-	  "Aquantia AQC100S 10 Gigabit Network Adapter", HWTYPE_AQ1,
-	  AQ_MEDIA_TYPE_FIBRE, AQ_LINK_ALL
-	},
-	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC107S,
-	  "Aquantia AQC107S 10 Gigabit Network Adapter", HWTYPE_AQ1,
-	  AQ_MEDIA_TYPE_TP, AQ_LINK_ALL
-	},
-	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC108S,
-	  "Aquantia AQC108S 5 Gigabit Network Adapter", HWTYPE_AQ1,
-	  AQ_MEDIA_TYPE_TP, AQ_LINK_100M | AQ_LINK_1G | AQ_LINK_2G5 | AQ_LINK_5G
-	},
-	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC109S,
-	  "Aquantia AQC109S 2.5 Gigabit Network Adapter", HWTYPE_AQ1,
-	  AQ_MEDIA_TYPE_TP, AQ_LINK_100M | AQ_LINK_1G | AQ_LINK_2G5
-	},
-	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC111S,
-	  "Aquantia AQC111S 5 Gigabit Network Adapter", HWTYPE_AQ1,
-	  AQ_MEDIA_TYPE_TP, AQ_LINK_100M | AQ_LINK_1G | AQ_LINK_2G5 | AQ_LINK_5G
-	},
-	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC112S,
-	  "Aquantia AQC112S 2.5 Gigabit Network Adapter", HWTYPE_AQ1,
-	  AQ_MEDIA_TYPE_TP, AQ_LINK_100M | AQ_LINK_1G | AQ_LINK_2G5
-	},
-	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_D100,
-	  "Aquantia D100 10 Gigabit Network Adapter", HWTYPE_AQ1,
-	  AQ_MEDIA_TYPE_FIBRE, AQ_LINK_ALL
-	},
-	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_D107,
-	  "Aquantia D107 10 Gigabit Network Adapter", HWTYPE_AQ1,
-	  AQ_MEDIA_TYPE_TP, AQ_LINK_ALL
-	},
-	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_D108,
-	  "Aquantia D108 5 Gigabit Network Adapter", HWTYPE_AQ1,
-	  AQ_MEDIA_TYPE_TP, AQ_LINK_100M | AQ_LINK_1G | AQ_LINK_2G5 | AQ_LINK_5G
-	},
-	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_D109,
-	  "Aquantia D109 2.5 Gigabit Network Adapter", HWTYPE_AQ1,
-	  AQ_MEDIA_TYPE_TP, AQ_LINK_100M | AQ_LINK_1G | AQ_LINK_2G5
-	},
-	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC113DEV,
-	  "Aquantia AQC113DEV 10 Gigabit Network Adapter", HWTYPE_AQ2,
-	  AQ_MEDIA_TYPE_TP, AQ_LINK_ALL | AQ_LINK_10M
-	},
-	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC113,
-	  "Aquantia AQC113 10 Gigabit Network Adapter", HWTYPE_AQ2,
-	  AQ_MEDIA_TYPE_TP, AQ_LINK_ALL | AQ_LINK_10M
-	},
-	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC113C,
-	  "Aquantia AQC113C 10 Gigabit Network Adapter", HWTYPE_AQ2,
-	  AQ_MEDIA_TYPE_TP, AQ_LINK_ALL | AQ_LINK_10M
-	},
-	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC113CA,
-	  "Aquantia AQC113CA 10 Gigabit Network Adapter", HWTYPE_AQ2,
-	  AQ_MEDIA_TYPE_TP, AQ_LINK_ALL | AQ_LINK_10M
-	},
-	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC113CS,
-	  "Aquantia AQC113CS 10 Gigabit Network Adapter", HWTYPE_AQ2,
-	  AQ_MEDIA_TYPE_TP, AQ_LINK_ALL | AQ_LINK_10M
-	},
-	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC114CS,
-	  "Aquantia AQC114CS 5 Gigabit Network Adapter", HWTYPE_AQ2,
-	  AQ_MEDIA_TYPE_TP,
-	  AQ_LINK_10M | AQ_LINK_100M | AQ_LINK_1G | AQ_LINK_2G5 | AQ_LINK_5G
-	},
-	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC115C,
-	  "Aquantia AQC115C 2.5 Gigabit Network Adapter", HWTYPE_AQ2,
-	  AQ_MEDIA_TYPE_TP,
-	  AQ_LINK_10M | AQ_LINK_100M | AQ_LINK_1G | AQ_LINK_2G5
-	},
-	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC116C,
-	  "Aquantia AQC116C Gigabit Network Adapter", HWTYPE_AQ2,
-	  AQ_MEDIA_TYPE_TP, AQ_LINK_10M | AQ_LINK_100M | AQ_LINK_1G
-	}
+const struct cfattach aq_ca = {
+	sizeof(struct aq_softc), aq_match, aq_attach, NULL,
+	aq_activate
 };
 
-static const struct aq_product *
+struct cfdriver aq_cd = {
+	NULL, "aq", DV_IFNET
+};
+
+int
+aq_match(struct device *dev, void *match, void *aux)
+{
+	return pci_matchbyid((struct pci_attach_args *)aux, aq_devices,
+	    sizeof(aq_devices) / sizeof(aq_devices[0]));
+}
+
+const struct aq_product *
 aq_lookup(const struct pci_attach_args *pa)
 {
 	unsigned int i;
 
-	for (i = 0; i < __arraycount(aq_products); i++) {
-		if (PCI_VENDOR(pa->pa_id)  == aq_products[i].aq_vendor &&
-		    PCI_PRODUCT(pa->pa_id) == aq_products[i].aq_product)
+	for (i = 0; i < sizeof(aq_products) / sizeof(aq_products[0]); i++) {
+	if (PCI_VENDOR(pa->pa_id) == aq_products[i].aq_vendor &&
+		PCI_PRODUCT(pa->pa_id) == aq_products[i].aq_product) {
 			return &aq_products[i];
+		}
 	}
+
 	return NULL;
 }
 
-static int
-aq_match(device_t parent, cfdata_t cf, void *aux)
+void
+aq_attach(struct device *parent, struct device *self, void *aux)
 {
-	struct pci_attach_args * const pa = aux;
-
-	if (aq_lookup(pa) != NULL)
-		return 1;
-
-	return 0;
-}
-
-static void
-aq_attach(device_t parent, device_t self, void *aux)
-{
-	struct aq_softc * const sc = device_private(self);
-	struct pci_attach_args * const pa = aux;
-	struct ifnet * const ifp = &sc->sc_ethercom.ec_if;
-	pci_chipset_tag_t pc;
-	pcitag_t tag;
-	pcireg_t command, memtype, bar;
+	struct aq_softc *sc = (struct aq_softc *)self;
+	struct pci_attach_args *pa = aux;
 	const struct aq_product *aqp;
-	int error;
+	pcireg_t bar, memtype;
+	pci_chipset_tag_t pc;
+	pci_intr_handle_t ih;
+	int (*isr)(void *);
+	const char *intrstr;
+	pcitag_t tag;
+	struct ifnet *ifp = &sc->sc_arpcom.ac_if;
+	int txmin, txmax, rxmin, rxmax;
+	int irqmode, irqnum;
+	int i;
 
-	sc->sc_dev = self;
-	mutex_init(&sc->sc_mutex, MUTEX_DEFAULT, IPL_NET);
-	mutex_init(&sc->sc_mpi_mutex, MUTEX_DEFAULT, IPL_NET);
+	mtx_init(&sc->sc_mpi_mutex, IPL_NET);
 
+	sc->sc_dmat = pa->pa_dmat;
 	sc->sc_pc = pc = pa->pa_pc;
 	sc->sc_pcitag = tag = pa->pa_tag;
-	sc->sc_dmat = pci_dma64_available(pa) ? pa->pa_dmat64 : pa->pa_dmat;
-
-	command = pci_conf_read(pa->pa_pc, pa->pa_tag, PCI_COMMAND_STATUS_REG);
-	command |= PCI_COMMAND_MASTER_ENABLE;
-	pci_conf_write(pa->pa_pc, pa->pa_tag, PCI_COMMAND_STATUS_REG, command);
 
 	sc->sc_product = PCI_PRODUCT(pa->pa_id);
 	sc->sc_revision = PCI_REVISION(pa->pa_class);
 
 	aqp = aq_lookup(pa);
-	KASSERT(aqp != NULL);
 
-	pci_aprint_devinfo_fancy(pa, "Ethernet controller", aqp->aq_name, 1);
-
-	bar = pci_conf_read(pc, tag, PCI_BAR(0));
-	if ((PCI_MAPREG_MEM_ADDR(bar) == 0) ||
-	    (PCI_MAPREG_TYPE(bar) != PCI_MAPREG_TYPE_MEM)) {
-		aprint_error_dev(sc->sc_dev, "wrong BAR type\n");
+	bar = pci_conf_read(pc, tag, AQ_BAR0);
+	if (PCI_MAPREG_TYPE(bar) != PCI_MAPREG_TYPE_MEM) {
+		printf(": wrong BAR type\n");
 		return;
 	}
-	memtype = pci_mapreg_type(pc, tag, PCI_BAR(0));
-	if (pci_mapreg_map(pa, PCI_BAR(0), memtype, 0, &sc->sc_iot, &sc->sc_ioh,
-	    NULL, &sc->sc_iosize) != 0) {
-		aprint_error_dev(sc->sc_dev, "unable to map register\n");
+
+	memtype = pci_mapreg_type(pc, tag, AQ_BAR0);
+	if (pci_mapreg_map(pa, AQ_BAR0, memtype, 0, &sc->sc_iot, &sc->sc_ioh,
+	    NULL, NULL, 0)) {
+		printf(": failed to map BAR0\n");
 		return;
 	}
+
+	sc->sc_nqueues = 1;
+	sc->sc_linkstat_irq = AQ_LINKSTAT_IRQ;
+	isr = aq_intr;
+	irqnum = 0;
+
+	if (pci_intr_map_msix(pa, 0, &ih) == 0) {
+		int nmsix = pci_intr_msix_count(pa);
+		/* don't do rss on aq2 yet */
+		if (aqp->aq_hwtype == HWTYPE_AQ1 && nmsix > 1) {
+			nmsix--;
+			sc->sc_intrmap = intrmap_create(&sc->sc_dev,
+			    nmsix, AQ_MAXQ, INTRMAP_POWEROF2);
+			sc->sc_nqueues = intrmap_count(sc->sc_intrmap);
+			KASSERT(sc->sc_nqueues > 0);
+			KASSERT(powerof2(sc->sc_nqueues));
+
+			sc->sc_linkstat_irq = 0;
+			isr = aq_intr_link;
+			irqnum++;
+		}
+		irqmode = AQ_INTR_CTRL_IRQMODE_MSIX;
+	} else if (pci_intr_map_msi(pa, &ih) == 0) {
+		irqmode = AQ_INTR_CTRL_IRQMODE_MSI;
+	} else if (pci_intr_map(pa, &ih) == 0) {
+		irqmode = AQ_INTR_CTRL_IRQMODE_LEGACY;
+	} else {
+		printf(": failed to map interrupt\n");
+		return;
+	}
+
+	sc->sc_ih = pci_intr_establish(pa->pa_pc, ih,
+	    IPL_NET | IPL_MPSAFE, isr, sc, self->dv_xname);
+	intrstr = pci_intr_string(pa->pa_pc, ih);
+	if (intrstr)
+		printf(": %s", intrstr);
+
+	if (sc->sc_nqueues > 1)
+		printf(", %d queues", sc->sc_nqueues);
 
 	switch (aqp->aq_hwtype) {
 	case HWTYPE_AQ1:
-		error = aq1_fw_reboot(sc);
+		if (aq1_fw_reboot(sc))
+			return;
 		break;
 	case HWTYPE_AQ2:
-		error = aq2_fw_reboot(sc);
+		if (aq2_fw_reboot(sc))
+			return;
 		break;
 	default:
-		error = ENOTSUP;
-		break;
-	}
-	if (error != 0)
-		goto attach_failure;
-
-	/* max queue num is 8, and must be 2^n */
-	if (ncpu >= 8)
-		sc->sc_nqueues = 8;
-	else if (ncpu >= 4)
-		sc->sc_nqueues = 4;
-	else if (ncpu >= 2)
-		sc->sc_nqueues = 2;
-	else
-		sc->sc_nqueues = 1;
-
-	sc->sc_tc_mode = (sc->sc_nqueues <= 4) ? 8 : 4;
-	sc->sc_tcs = 1;
-
-	int msixcount = pci_msix_count(pa->pa_pc, pa->pa_tag);
-#ifndef CONFIG_NO_TXRX_INDEPENDENT
-	if (msixcount >= (sc->sc_nqueues * 2 + 1)) {
-		/* TX intrs + RX intrs + LINKSTAT intrs */
-		sc->sc_use_txrx_independent_intr = true;
-		sc->sc_msix = true;
-	} else if (msixcount >= (sc->sc_nqueues * 2)) {
-		/* TX intrs + RX intrs */
-		sc->sc_use_txrx_independent_intr = true;
-		sc->sc_msix = true;
-	} else
-#endif
-	if (msixcount >= (sc->sc_nqueues + 1)) {
-		/* TX/RX intrs LINKSTAT intrs */
-		sc->sc_use_txrx_independent_intr = false;
-		sc->sc_msix = true;
-	} else if (msixcount >= sc->sc_nqueues) {
-		/* TX/RX intrs */
-		sc->sc_use_txrx_independent_intr = false;
-		sc->sc_no_link_intr = true;
-		sc->sc_msix = true;
-	} else {
-		/* giving up using MSI-X */
-		sc->sc_msix = false;
+		return;
 	}
 
-	aprint_debug_dev(sc->sc_dev,
-	    "ncpu=%d, pci_msix_count=%d."
-	    " allocate %d interrupts for %d%s queues%s\n",
-	    ncpu, msixcount,
-	    (sc->sc_use_txrx_independent_intr ?
-	    (sc->sc_nqueues * 2) : sc->sc_nqueues) +
-	    (sc->sc_no_link_intr ? 0 : 1),
-	    sc->sc_nqueues,
-	    sc->sc_use_txrx_independent_intr ? "*2" : "",
-	    (sc->sc_no_link_intr) ? "" : ", and link status");
+	if (aq_hw_reset(sc))
+		return;
 
-	if (sc->sc_msix)
-		error = aq_setup_msix(sc, pa);
-	else
-		error = ENODEV;
+	if (sc->sc_fw_ops->get_mac_addr(sc))
+		return;
+	printf(", address %s", ether_sprintf(sc->sc_enaddr.ether_addr_octet));
 
-	if (error != 0) {
-		/* if MSI-X failed, fallback to MSI with single queue */
-		sc->sc_use_txrx_independent_intr = false;
-		sc->sc_msix = false;
-		sc->sc_nqueues = 1;
-		sc->sc_no_link_intr = false;
-		aprint_debug_dev(sc->sc_dev, "MSI-X failed: %d, trying MSI",
-		    error);
-		// error = aq_setup_legacy(sc, pa, PCI_INTR_TYPE_MSI);
-	}
-	if (error != 0) {
-		/* if MSI failed, fallback to INTx */
-		aprint_debug_dev(sc->sc_dev, "MSI failed: %d, trying legacy",
-		    error);
-		// error = aq_setup_legacy(sc, pa, PCI_INTR_TYPE_INTX);
-	}
-	if (error != 0)
-		goto attach_failure;
+	if (aq_init_rss(sc))
+		return;
 
-	callout_init(&sc->sc_tick_ch, CALLOUT_MPSAFE);
-	callout_setfunc(&sc->sc_tick_ch, aq_tick, sc);
-
-	char wqname[MAXCOMLEN];
-	snprintf(wqname, sizeof(wqname), "%sReset", device_xname(sc->sc_dev));
-	error = workqueue_create(&sc->sc_reset_wq, wqname,
-	    aq_handle_reset_work, sc, PRI_SOFTNET, IPL_SOFTCLOCK,
-	    WQ_MPSAFE);
-	if (error != 0) {
-		aprint_error_dev(sc->sc_dev,
-		    "unable to create reset workqueue\n");
-		goto attach_failure;
-	}
-
-	sc->sc_intr_moderation_enable = CONFIG_INTR_MODERATION_ENABLE;
-
-	if (sc->sc_msix && (sc->sc_nqueues > 1))
-		sc->sc_rss_enable = true;
-	else
-		sc->sc_rss_enable = false;
-
-	error = aq_txrx_rings_alloc(sc);
-	if (error != 0)
-		goto attach_failure;
-
-	error = aq_hw_reset(sc);
-	if (error != 0)
-		goto attach_failure;
-
-	error = sc->sc_fw_ops->get_mac_addr(sc);
-	if (error != 0)
-		goto attach_failure;
-
-	aq_init_rss(sc);
-
-	error = aq_hw_init(sc);	/* initialize and interrupts */
-	if (error != 0)
-		goto attach_failure;
+	if (aq_hw_init(sc, irqmode, (sc->sc_nqueues > 1)))
+		return;
 
 	sc->sc_media_type = aqp->aq_media_type;
 	sc->sc_available_rates = aqp->aq_available_rates;
 
-	sc->sc_ethercom.ec_ifmedia = &sc->sc_media;
-	ifmedia_init(&sc->sc_media, IFM_IMASK,
-	    aq_ifmedia_change, aq_ifmedia_status);
-	aq_initmedia(sc);
+	ifmedia_init(&sc->sc_media, IFM_IMASK, aq_ifmedia_change,
+	    aq_ifmedia_status);
 
-	strlcpy(ifp->if_xname, device_xname(self), IFNAMSIZ);
+	bcopy(sc->sc_enaddr.ether_addr_octet, sc->sc_arpcom.ac_enaddr, 6);
+	strlcpy(ifp->if_xname, self->dv_xname, IFNAMSIZ);
 	ifp->if_softc = sc;
-	ifp->if_flags = IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST;
-	ifp->if_extflags = IFEF_MPSAFE;
-	ifp->if_baudrate = IF_Gbps(10);
-	ifp->if_init = aq_init;
+	ifp->if_flags = IFF_BROADCAST | IFF_MULTICAST | IFF_SIMPLEX;
+	ifp->if_xflags = IFXF_MPSAFE;
 	ifp->if_ioctl = aq_ioctl;
-	if (sc->sc_msix && (sc->sc_nqueues > 1))
-		ifp->if_transmit = aq_transmit;
-	ifp->if_start = aq_start;
-	ifp->if_stop = aq_stop;
-	ifp->if_watchdog = NULL;
-	IFQ_SET_READY(&ifp->if_snd);
-
-	/* initialize capabilities */
-	sc->sc_ethercom.ec_capabilities = 0;
-	sc->sc_ethercom.ec_capenable = 0;
-#if notyet
-	/* TODO */
-	sc->sc_ethercom.ec_capabilities |= ETHERCAP_EEE;
+	ifp->if_qstart = aq_start;
+	ifp->if_watchdog = aq_watchdog;
+	ifp->if_hardmtu = 9000;
+	ifp->if_capabilities = IFCAP_VLAN_MTU | IFCAP_CSUM_IPv4 |
+	    IFCAP_CSUM_UDPv4 | IFCAP_CSUM_UDPv6 | IFCAP_CSUM_TCPv4 |
+	    IFCAP_CSUM_TCPv6;
+#if NVLAN > 0
+	ifp->if_capabilities |= IFCAP_VLAN_HWTAGGING;
 #endif
-	sc->sc_ethercom.ec_capabilities |=
-	    ETHERCAP_JUMBO_MTU |
-	    ETHERCAP_VLAN_MTU |
-	    ETHERCAP_VLAN_HWTAGGING |
-	    ETHERCAP_VLAN_HWFILTER;
-	sc->sc_ethercom.ec_capenable |=
-	    ETHERCAP_VLAN_HWTAGGING |
-	    ETHERCAP_VLAN_HWFILTER;
+	ifq_init_maxlen(&ifp->if_snd, AQ_TXD_NUM);
 
-	ifp->if_capabilities = 0;
-	ifp->if_capenable = 0;
-#ifdef CONFIG_LRO_SUPPORT
-	ifp->if_capabilities |= IFCAP_LRO;
-	ifp->if_capenable |= IFCAP_LRO;
-#endif
-#if notyet
-	/* TSO */
-	ifp->if_capabilities |= IFCAP_TSOv4 | IFCAP_TSOv6;
-#endif
-
-	/* TX hardware checksum offloading */
-	ifp->if_capabilities |= IFCAP_CSUM_IPv4_Tx;
-	ifp->if_capabilities |= IFCAP_CSUM_TCPv4_Tx | IFCAP_CSUM_TCPv6_Tx;
-	ifp->if_capabilities |= IFCAP_CSUM_UDPv4_Tx | IFCAP_CSUM_UDPv6_Tx;
-	/* RX hardware checksum offloading */
-	ifp->if_capabilities |= IFCAP_CSUM_IPv4_Rx;
-	ifp->if_capabilities |= IFCAP_CSUM_TCPv4_Rx | IFCAP_CSUM_TCPv6_Rx;
-	ifp->if_capabilities |= IFCAP_CSUM_UDPv4_Rx | IFCAP_CSUM_UDPv6_Rx;
-
-	if_initialize(ifp);
-	ifp->if_percpuq = if_percpuq_create(ifp);
-	if_deferred_start_init(ifp, NULL);
-	ether_ifattach(ifp, sc->sc_enaddr.ether_addr_octet);
-	ether_set_vlan_cb(&sc->sc_ethercom, aq_vlan_cb);
-	ether_set_ifflags_cb(&sc->sc_ethercom, aq_ifflags_cb);
-	if_register(ifp);
-
-	/* only intr about link */
-	aq_enable_intr(sc, /*link*/true, /*txrx*/false);
-
-	/* update media */
-	aq_ifmedia_change(ifp);
-
-// #if NSYSMON_ENVSYS > 0
-// 	/* temperature monitoring */
-// 	if (sc->sc_fw_ops != NULL && sc->sc_fw_ops->get_temperature != NULL &&
-// 	    (((sc->sc_fw_caps & FW2X_CTRL_TEMPERATURE) != 0) ||
-// 	    HWTYPE_AQ2_P(sc))) {
-// 		sc->sc_sme = sysmon_envsys_create();
-// 		sc->sc_sme->sme_name = device_xname(self);
-// 		sc->sc_sme->sme_cookie = sc;
-// 		sc->sc_sme->sme_flags = 0;
-// 		sc->sc_sme->sme_refresh = aq_temp_refresh;
-// 		sc->sc_sensor_temp.units = ENVSYS_STEMP;
-// 		sc->sc_sensor_temp.state = ENVSYS_SINVALID;
-// 		snprintf(sc->sc_sensor_temp.desc, ENVSYS_DESCLEN, "PHY");
-
-// 		sysmon_envsys_sensor_attach(sc->sc_sme, &sc->sc_sensor_temp);
-// 		if (sysmon_envsys_register(sc->sc_sme)) {
-// 			sysmon_envsys_destroy(sc->sc_sme);
-// 			sc->sc_sme = NULL;
-// 			aprint_debug_dev(sc->sc_dev, "failed to create envsys");
-// 			error = EINVAL;
-// 			goto attach_failure;
-// 		}
-
-// 		/*
-// 		 * for unknown reasons, the first call of fw2x_get_temperature()
-// 		 * will always fail (firmware matter?), so run once now.
-// 		 */
-// 		aq_temp_refresh(sc->sc_sme, &sc->sc_sensor_temp);
-// 	}
-// #endif
-
-#ifdef AQ_EVENT_COUNTERS
-	/* get starting statistics values */
-	if (sc->sc_fw_ops != NULL && sc->sc_fw_ops->get_stats != NULL &&
-	    sc->sc_fw_ops->get_stats(sc, &sc->sc_statistics[0]) == 0) {
-		sc->sc_poll_statistics = true;
+	ifmedia_init(&sc->sc_media, IFM_IMASK, aq_ifmedia_change,
+	    aq_ifmedia_status);
+	if (sc->sc_available_rates & AQ_LINK_10M) {
+		ifmedia_add(&sc->sc_media, IFM_ETHER|IFM_10_T, 0, NULL);
+		ifmedia_add(&sc->sc_media, IFM_ETHER|IFM_10_T|IFM_FDX, 0,
+		    NULL);
 	}
 
-	AQ_EVCNT_ATTACH_MISC(sc, uprc, "RX unicast packet");
-	AQ_EVCNT_ATTACH_MISC(sc, bprc, "RX broadcast packet");
-	AQ_EVCNT_ATTACH_MISC(sc, mprc, "RX multicast packet");
-	AQ_EVCNT_ATTACH_MISC(sc, erpr, "RX error packet");
-	AQ_EVCNT_ATTACH_MISC(sc, ubrc, "RX unicast bytes");
-	AQ_EVCNT_ATTACH_MISC(sc, bbrc, "RX broadcast bytes");
-	AQ_EVCNT_ATTACH_MISC(sc, mbrc, "RX multicast bytes");
-	AQ_EVCNT_ATTACH_MISC(sc, prc, "RX good packet");
-	AQ_EVCNT_ATTACH_MISC(sc, uptc, "TX unicast packet");
-	AQ_EVCNT_ATTACH_MISC(sc, bptc, "TX broadcast packet");
-	AQ_EVCNT_ATTACH_MISC(sc, mptc, "TX multicast packet");
-	AQ_EVCNT_ATTACH_MISC(sc, erpt, "TX error packet");
-	AQ_EVCNT_ATTACH_MISC(sc, ubtc, "TX unicast bytes");
-	AQ_EVCNT_ATTACH_MISC(sc, bbtc, "TX broadcast bytes");
-	AQ_EVCNT_ATTACH_MISC(sc, mbtc, "TX multicast bytes");
-	AQ_EVCNT_ATTACH_MISC(sc, ptc, "TX good packet");
-	AQ_EVCNT_ATTACH_MISC(sc, dpc, "DMA drop packet");
-	AQ_EVCNT_ATTACH_MISC(sc, cprc, "RX coalesced packet");
-#endif
+	if (sc->sc_available_rates & AQ_LINK_100M) {
+		ifmedia_add(&sc->sc_media, IFM_ETHER|IFM_100_TX, 0, NULL);
+		ifmedia_add(&sc->sc_media, IFM_ETHER|IFM_100_TX|IFM_FDX, 0,
+		    NULL);
+	}
 
-	if (pmf_device_register(self, NULL, NULL))
-		pmf_class_network_register(self, ifp);
-	else
-		aprint_error_dev(self, "couldn't establish power handler\n");
+	if (sc->sc_available_rates & AQ_LINK_1G) {
+		ifmedia_add(&sc->sc_media, IFM_ETHER|IFM_1000_T, 0, NULL);
+		ifmedia_add(&sc->sc_media, IFM_ETHER|IFM_1000_T|IFM_FDX, 0,
+		    NULL);
+	}
 
-	return;
+	if (sc->sc_available_rates & AQ_LINK_2G5) {
+		ifmedia_add(&sc->sc_media, IFM_ETHER | IFM_2500_T, 0, NULL);
+		ifmedia_add(&sc->sc_media, IFM_ETHER | IFM_2500_T | IFM_FDX,
+		    0, NULL);
+	}
 
- attach_failure:
-	aprint_debug_dev(sc->sc_dev, "attach failed: %d", error);
-	aq_detach(self, 0);
-}
+	if (sc->sc_available_rates & AQ_LINK_5G) {
+		ifmedia_add(&sc->sc_media, IFM_ETHER | IFM_5000_T, 0, NULL);
+		ifmedia_add(&sc->sc_media, IFM_ETHER | IFM_5000_T | IFM_FDX,
+		    0, NULL);
+	}
 
-static int
-aq_detach(device_t self, int flags __unused)
-{
-	struct aq_softc * const sc = device_private(self);
-	struct ifnet * const ifp = &sc->sc_ethercom.ec_if;
-	int i;
+	if (sc->sc_available_rates & AQ_LINK_10G) {
+		ifmedia_add(&sc->sc_media, IFM_ETHER | IFM_10G_T, 0, NULL);
+		ifmedia_add(&sc->sc_media, IFM_ETHER | IFM_10G_T | IFM_FDX,
+		    0, NULL);
+	}
 
-	if (sc->sc_dev == NULL)
-		return 0;
+	ifmedia_add(&sc->sc_media, IFM_ETHER | IFM_AUTO, 0, NULL);
+	ifmedia_add(&sc->sc_media, IFM_ETHER | IFM_AUTO | IFM_FDX, 0, NULL);
+	ifmedia_set(&sc->sc_media, IFM_ETHER | IFM_AUTO);
+	aq_set_linkmode(sc, AQ_LINK_AUTO, AQ_FC_NONE, AQ_EEE_DISABLE);
 
-	if (sc->sc_iosize != 0) {
-		if (ifp->if_softc != NULL) {
-			IFNET_LOCK(ifp);
-			aq_stop(ifp, 1);
-			IFNET_UNLOCK(ifp);
-		}
+        if_attach(ifp);
+        ether_ifattach(ifp);
 
-		for (i = 0; i < AQ_NINTR_MAX; i++) {
-			if (sc->sc_ihs[i] != NULL) {
-				pci_intr_disestablish(sc->sc_pc, sc->sc_ihs[i]);
-				sc->sc_ihs[i] = NULL;
+	if_attach_iqueues(ifp, sc->sc_nqueues);
+	if_attach_queues(ifp, sc->sc_nqueues);
+
+	/*
+	 * set interrupt moderation for up to 20k interrupts per second,
+	 * more rx than tx.  these values are in units of 2us.
+	 */
+	txmin = 20;
+	txmax = 200;
+	rxmin = 6;
+	rxmax = 60;
+
+	for (i = 0; i < sc->sc_nqueues; i++) {
+		struct aq_queues *aq = &sc->sc_queues[i];
+		struct aq_rxring *rx = &aq->q_rx;
+		struct aq_txring *tx = &aq->q_tx;
+		pci_intr_handle_t ih;
+
+		aq->q_sc = sc;
+		aq->q_index = i;
+		rx->rx_q = i;
+		rx->rx_ifiq = ifp->if_iqs[i];
+		rx->rx_m_head = NULL;
+		rx->rx_m_tail = &rx->rx_m_head;
+		rx->rx_m_error = 0;
+		ifp->if_iqs[i]->ifiq_softc = aq;
+		timeout_set(&rx->rx_refill, aq_refill, rx);
+
+		tx->tx_q = i;
+		tx->tx_ifq = ifp->if_ifqs[i];
+		ifp->if_ifqs[i]->ifq_softc = aq;
+
+		snprintf(aq->q_name, sizeof(aq->q_name), "%s:%u",
+		    DEVNAME(sc), i);
+
+		if (sc->sc_nqueues > 1) {
+			if (pci_intr_map_msix(pa, irqnum, &ih)) {
+				printf(": unable to map msi-x vector %d\n",
+				    irqnum);
+				return;
 			}
-		}
-		if (sc->sc_nintrs > 0) {
-			callout_stop(&sc->sc_tick_ch);
 
-			pci_intr_release(sc->sc_pc, sc->sc_intrs,
-			    sc->sc_nintrs);
-			sc->sc_intrs = NULL;
-			sc->sc_nintrs = 0;
-		}
-
-		if (sc->sc_reset_wq != NULL) {
-			workqueue_destroy(sc->sc_reset_wq);
-			sc->sc_reset_wq = NULL;
-		}
-
-		aq_txrx_rings_free(sc);
-
-		if (ifp->if_softc != NULL) {
-			ether_ifdetach(ifp);
-			if_detach(ifp);
+			aq->q_ihc = pci_intr_establish_cpu(sc->sc_pc, ih,
+			    IPL_NET | IPL_MPSAFE, intrmap_cpu(sc->sc_intrmap, i),
+			    aq_intr_queue, aq, aq->q_name);
+			if (aq->q_ihc == NULL) {
+				printf(": unable to establish interrupt %d\n",
+				    irqnum);
+				return;
+			}
+			rx->rx_irq = irqnum;
+			tx->tx_irq = irqnum;
+			irqnum++;
+		} else {
+			rx->rx_irq = irqnum++;
+			tx->tx_irq = irqnum++;
 		}
 
-		bus_space_unmap(sc->sc_iot, sc->sc_ioh, sc->sc_iosize);
-		sc->sc_iosize = 0;
+		if (HWTYPE_AQ2_P(sc)) {
+			AQ_WRITE_REG_BIT(sc, AQ2_TX_INTR_MODERATION_CTL_REG(i),
+			    AQ2_TX_INTR_MODERATION_CTL_MIN, txmin);
+			AQ_WRITE_REG_BIT(sc, AQ2_TX_INTR_MODERATION_CTL_REG(i),
+			    AQ2_TX_INTR_MODERATION_CTL_MAX, txmax);
+			AQ_WRITE_REG_BIT(sc, AQ2_TX_INTR_MODERATION_CTL_REG(i),
+			    AQ2_TX_INTR_MODERATION_CTL_EN, 1);
+		} else {
+			AQ_WRITE_REG_BIT(sc, TX_INTR_MODERATION_CTL_REG(i),
+			    TX_INTR_MODERATION_CTL_MIN, txmin);
+			AQ_WRITE_REG_BIT(sc, TX_INTR_MODERATION_CTL_REG(i),
+			    TX_INTR_MODERATION_CTL_MAX, txmax);
+			AQ_WRITE_REG_BIT(sc, TX_INTR_MODERATION_CTL_REG(i),
+			    TX_INTR_MODERATION_CTL_EN, 1);
+		}
+		AQ_WRITE_REG_BIT(sc, RX_INTR_MODERATION_CTL_REG(i),
+		    RX_INTR_MODERATION_CTL_MIN, rxmin);
+		AQ_WRITE_REG_BIT(sc, RX_INTR_MODERATION_CTL_REG(i),
+		    RX_INTR_MODERATION_CTL_MAX, rxmax);
+		AQ_WRITE_REG_BIT(sc, RX_INTR_MODERATION_CTL_REG(i),
+		    RX_INTR_MODERATION_CTL_EN, 1);
 	}
 
-// #if NSYSMON_ENVSYS > 0
-// 	if (sc->sc_sme != NULL) {
-// 		/* all sensors associated with this will also be detached */
-// 		sysmon_envsys_unregister(sc->sc_sme);
-// 	}
-// #endif
+	AQ_WRITE_REG_BIT(sc, TX_DMA_INT_DESC_WRWB_EN_REG,
+	    TX_DMA_INT_DESC_WRWB_EN, 0);
+	AQ_WRITE_REG_BIT(sc, TX_DMA_INT_DESC_WRWB_EN_REG,
+	    TX_DMA_INT_DESC_MODERATE_EN, 1);
+	AQ_WRITE_REG_BIT(sc, RX_DMA_INT_DESC_WRWB_EN_REG,
+	    RX_DMA_INT_DESC_WRWB_EN, 0);
+	AQ_WRITE_REG_BIT(sc, RX_DMA_INT_DESC_WRWB_EN_REG,
+	    RX_DMA_INT_DESC_MODERATE_EN, 1);
 
-#ifdef AQ_EVENT_COUNTERS
-	AQ_EVCNT_DETACH(sc, uprc);
-	AQ_EVCNT_DETACH(sc, mprc);
-	AQ_EVCNT_DETACH(sc, bprc);
-	AQ_EVCNT_DETACH(sc, erpt);
-	AQ_EVCNT_DETACH(sc, uptc);
-	AQ_EVCNT_DETACH(sc, mptc);
-	AQ_EVCNT_DETACH(sc, bptc);
-	AQ_EVCNT_DETACH(sc, erpr);
-	AQ_EVCNT_DETACH(sc, mbtc);
-	AQ_EVCNT_DETACH(sc, bbtc);
-	AQ_EVCNT_DETACH(sc, mbrc);
-	AQ_EVCNT_DETACH(sc, bbrc);
-	AQ_EVCNT_DETACH(sc, ubrc);
-	AQ_EVCNT_DETACH(sc, ubtc);
-	AQ_EVCNT_DETACH(sc, ptc);
-	AQ_EVCNT_DETACH(sc, prc);
-	AQ_EVCNT_DETACH(sc, dpc);
-	AQ_EVCNT_DETACH(sc, cprc);
-#endif
-
-	if (sc->sc_ethercom.ec_ifmedia != NULL) {
-		ifmedia_fini(&sc->sc_media);
-		sc->sc_ethercom.ec_ifmedia = NULL;
-	}
-
-	mutex_destroy(&sc->sc_mpi_mutex);
-	mutex_destroy(&sc->sc_mutex);
-	sc->sc_dev = NULL;
-
-	return 0;
+	aq_enable_intr(sc, 1, 0);
+	printf("\n");
 }
 
-static int
-aq_establish_intr(struct aq_softc *sc, int intno, kcpuset_t *affinity,
-    int (*func)(void *), void *arg, const char *xname)
+int
+aq1_fw_reboot(struct aq_softc *sc)
 {
-	char intrbuf[PCI_INTRSTR_LEN];
-	pci_chipset_tag_t pc = sc->sc_pc;
-	void *vih;
-	const char *intrstr = NULL;
+	uint32_t ver, v, boot_exit_code;
+	int i, error;
+	enum aq_fw_bootloader_mode mode;
 
-	intrstr = pci_intr_string(pc, sc->sc_intrs[intno], intrbuf,
-	    sizeof(intrbuf));
+	mode = FW_BOOT_MODE_UNKNOWN;
 
-	pci_intr_setattr(pc, &sc->sc_intrs[intno], PCI_INTR_MPSAFE, true);
+	ver = AQ_READ_REG(sc, AQ_FW_VERSION_REG);
 
-	vih = pci_intr_establish_xname(pc, sc->sc_intrs[intno],
-	    IPL_NET, func, arg, xname);
-	if (vih == NULL) {
-		aprint_error_dev(sc->sc_dev,
-		    "unable to establish MSI-X%s%s for %s\n",
-		    intrstr ? " at " : "",
-		    intrstr ? intrstr : "", xname);
-		return EIO;
-	}
-	sc->sc_ihs[intno] = vih;
-
-	if (affinity != NULL) {
-		/* Round-robin affinity */
-		kcpuset_zero(affinity);
-		kcpuset_set(affinity, intno % ncpu);
-		interrupt_distribute(vih, affinity, NULL);
+	for (i = 1000; i > 0; i--) {
+		v = AQ_READ_REG(sc, FW_MPI_DAISY_CHAIN_STATUS_REG);
+		boot_exit_code = AQ_READ_REG(sc, FW_BOOT_EXIT_CODE_REG);
+		if (v != 0x06000000 || boot_exit_code != 0)
+			break;
 	}
 
-	return 0;
-}
-
-static int
-aq_establish_msix_intr(struct aq_softc *sc)
-{
-	kcpuset_t *affinity;
-	int error, intno, i;
-	char intr_xname[INTRDEVNAMEBUF];
-
-	kcpuset_create(&affinity, false);
-
-	intno = 0;
-
-	if (sc->sc_use_txrx_independent_intr) {
-		for (i = 0; i < sc->sc_nqueues; i++) {
-			snprintf(intr_xname, sizeof(intr_xname), "%s RX%d",
-			    device_xname(sc->sc_dev), i);
-			sc->sc_rx_irq[i] = intno;
-			error = aq_establish_intr(sc, intno++, affinity,
-			   aq_rx_intr, &sc->sc_queue[i].rxring, intr_xname);
-			if (error != 0)
-				goto fail;
-		}
-		for (i = 0; i < sc->sc_nqueues; i++) {
-			snprintf(intr_xname, sizeof(intr_xname), "%s TX%d",
-			    device_xname(sc->sc_dev), i);
-			sc->sc_tx_irq[i] = intno;
-			error = aq_establish_intr(sc, intno++, affinity,
-			    aq_tx_intr, &sc->sc_queue[i].txring, intr_xname);
-			if (error != 0)
-				goto fail;
-		}
-	} else {
-		for (i = 0; i < sc->sc_nqueues; i++) {
-			snprintf(intr_xname, sizeof(intr_xname), "%s TXRX%d",
-			    device_xname(sc->sc_dev), i);
-			sc->sc_rx_irq[i] = intno;
-			sc->sc_tx_irq[i] = intno;
-			error = aq_establish_intr(sc, intno++, affinity,
-			    aq_txrx_intr, &sc->sc_queue[i], intr_xname);
-			if (error != 0)
-				goto fail;
-		}
+	if (i <= 0) {
+		printf(": F/W reset failed. Neither RBL nor FLB started");
+		return ETIMEDOUT;
 	}
 
-	if (!sc->sc_no_link_intr) {
-		snprintf(intr_xname, sizeof(intr_xname), "%s LINK",
-		    device_xname(sc->sc_dev));
-		sc->sc_linkstat_irq = intno;
-		error = aq_establish_intr(sc, intno++, affinity,
-		    aq_link_intr, sc, intr_xname);
-		if (error != 0)
-			goto fail;
+	sc->sc_rbl_enabled = (boot_exit_code != 0);
+
+	/*
+	 * Having FW version 0 is an indicator that cold start
+	 * is in progress. This means two things:
+	 * 1) Driver have to wait for FW/HW to finish boot (500ms giveup)
+	 * 2) Driver may skip reset sequence and save time.
+	 */
+	if (sc->sc_fast_start_enabled && (ver != 0)) {
+		if (aq1_fw_read_version(sc) == 0)
+			goto faststart;
 	}
 
-	kcpuset_destroy(affinity);
-	return 0;
-
- fail:
-	for (i = 0; i < AQ_NINTR_MAX; i++) {
-		if (sc->sc_ihs[i] != NULL) {
-			pci_intr_disestablish(sc->sc_pc, sc->sc_ihs[i]);
-			sc->sc_ihs[i] = NULL;
-		}
-	}
-
-	kcpuset_destroy(affinity);
-	return ENOMEM;
-}
-
-static int
-aq_setup_msix(struct aq_softc *sc, struct pci_attach_args *pa)
-{
-	int nqueue = sc->sc_nqueues;
-	bool txrx_independent = sc->sc_use_txrx_independent_intr;
-	bool linkintr = !sc->sc_no_link_intr;
-	int error, nintr;
-
-	if (txrx_independent)
-		nintr = nqueue * 2;
-	else
-		nintr = nqueue;
-
-	if (linkintr)
-		nintr++;
-
-	error = pci_msix_alloc_exact(pa, &sc->sc_intrs, nintr);
+	error = aq1_mac_soft_reset(sc, &mode);
 	if (error != 0) {
-		aprint_error_dev(sc->sc_dev,
-		    "failed to allocate MSI-X interrupts\n");
-		goto fail;
+		printf("%s: MAC reset failed: %d\n", DEVNAME(sc), error);
+		return error;
 	}
 
-	error = aq_establish_msix_intr(sc);
-	if (error == 0) {
-		sc->sc_nintrs = nintr;
-	} else {
-		pci_intr_release(sc->sc_pc, sc->sc_intrs, nintr);
-		sc->sc_nintrs = 0;
+	switch (mode) {
+	case FW_BOOT_MODE_FLB:
+		DPRINTF(("%s: FLB> F/W successfully loaded from flash.",
+		    DEVNAME(sc)));
+		sc->sc_flash_present = 1;
+		break;
+	case FW_BOOT_MODE_RBL_FLASH:
+		DPRINTF(("%s: RBL> F/W loaded from flash. Host Bootload "
+		    "disabled.", DEVNAME(sc)));
+		sc->sc_flash_present = 1;
+		break;
+	case FW_BOOT_MODE_UNKNOWN:
+		printf("%s: F/W bootload error: unknown bootloader type",
+		    DEVNAME(sc));
+		return ENOTSUP;
+	case FW_BOOT_MODE_RBL_HOST_BOOTLOAD:
+		printf("%s: RBL> F/W Host Bootload not implemented", DEVNAME(sc));
+		return ENOTSUP;
 	}
- fail:
-	return error;
 
+ faststart:
+	error = aq1_fw_read_version(sc);
+	if (error != 0)
+		return error;
+
+	error = aq1_fw_version_init(sc);
+	if (error != 0)
+		return error;
+
+	return aq1_hw_init_ucp(sc);
 }
 
-// static int
-// aq_setup_legacy(struct aq_softc *sc, struct pci_attach_args *pa,
-//     pci_intr_type_t inttype)
-// {
-// 	int counts[PCI_INTR_TYPE_SIZE];
-// 	int error, nintr;
-
-// 	nintr = 1;
-
-// 	memset(counts, 0, sizeof(counts));
-// 	counts[inttype] = nintr;
-
-// 	error = pci_intr_alloc(pa, &sc->sc_intrs, counts, inttype);
-// 	if (error != 0) {
-// 		aprint_error_dev(sc->sc_dev,
-// 		    "failed to allocate%s interrupts\n",
-// 		    (inttype == PCI_INTR_TYPE_MSI) ? " MSI" : "");
-// 		return error;
-// 	}
-// 	error = aq_establish_intr(sc, 0, NULL, aq_legacy_intr, sc,
-// 	    device_xname(sc->sc_dev));
-// 	if (error == 0) {
-// 		sc->sc_nintrs = nintr;
-// 	} else {
-// 		pci_intr_release(sc->sc_pc, sc->sc_intrs, nintr);
-// 		sc->sc_nintrs = 0;
-// 	}
-// 	return error;
-// }
-
-static void
-aq1_global_software_reset(struct aq_softc *sc)
-{
-	uint32_t v;
-
-	AQ_WRITE_REG_BIT(sc, RX_SYSCONTROL_REG, RX_SYSCONTROL_RESET_DIS, 0);
-	AQ_WRITE_REG_BIT(sc, TX_SYSCONTROL_REG, TX_SYSCONTROL_RESET_DIS, 0);
-	AQ_WRITE_REG_BIT(sc, FW_MPI_RESETCTRL_REG,
-	    FW_MPI_RESETCTRL_RESET_DIS, 0);
-
-	v = AQ_READ_REG(sc, AQ_FW_SOFTRESET_REG);
-	v &= ~AQ_FW_SOFTRESET_DIS;
-	v |= AQ_FW_SOFTRESET_RESET;
-	AQ_WRITE_REG(sc, AQ_FW_SOFTRESET_REG, v);
-}
-
-static int
-aq1_mac_soft_reset_rbl(struct aq_softc *sc, aq_fw_bootloader_mode_t *mode)
+int
+aq1_mac_soft_reset_rbl(struct aq_softc *sc, enum aq_fw_bootloader_mode *mode)
 {
 	int timo;
 
-	aprint_debug_dev(sc->sc_dev, "RBL> MAC reset STARTED!\n");
+	DPRINTF(("%s: RBL> MAC reset STARTED!\n", DEVNAME(sc)));
 
 	AQ_WRITE_REG(sc, AQ_FW_GLB_CTL2_REG, 0x40e1);
 	AQ_WRITE_REG(sc, AQ_FW_GLB_CPU_SEM_REG(0), 1);
@@ -2349,36 +1602,37 @@ aq1_mac_soft_reset_rbl(struct aq_softc *sc, aq_fw_bootloader_mode_t *mode)
 		rbl_status = AQ_READ_REG(sc, FW_BOOT_EXIT_CODE_REG) & 0xffff;
 		if (rbl_status != 0 && rbl_status != RBL_STATUS_DEAD)
 			break;
-		msec_delay(1);
+		delay(1000);
 	}
+
 	if (timo <= 0) {
-		aprint_error_dev(sc->sc_dev,
-		    "RBL> RBL restart failed: timeout\n");
+		printf("%s: RBL> RBL restart failed: timeout\n", DEVNAME(sc));
 		return EBUSY;
 	}
+
 	switch (rbl_status) {
 	case RBL_STATUS_SUCCESS:
 		if (mode != NULL)
 			*mode = FW_BOOT_MODE_RBL_FLASH;
-		aprint_debug_dev(sc->sc_dev, "RBL> reset complete! [Flash]\n");
+		DPRINTF(("%s: RBL> reset complete! [Flash]\n", DEVNAME(sc)));
 		break;
 	case RBL_STATUS_HOST_BOOT:
 		if (mode != NULL)
 			*mode = FW_BOOT_MODE_RBL_HOST_BOOTLOAD;
-		aprint_debug_dev(sc->sc_dev,
-		    "RBL> reset complete! [Host Bootload]\n");
+		DPRINTF(("%s: RBL> reset complete! [Host Bootload]\n",
+		    DEVNAME(sc)));
 		break;
 	case RBL_STATUS_FAILURE:
 	default:
-		aprint_error_dev(sc->sc_dev,
-		    "unknown RBL status 0x%x\n", rbl_status);
+		printf("%s: unknown RBL status 0x%x\n", DEVNAME(sc),
+		    rbl_status);
 		return EBUSY;
 	}
 
 	return 0;
 }
 
-static int
+int
 aq1_mac_soft_reset_flb(struct aq_softc *sc)
 {
 	uint32_t v;
@@ -2389,7 +1643,7 @@ aq1_mac_soft_reset_flb(struct aq_softc *sc)
 	 * Let Felicity hardware to complete SMBUS transaction before
 	 * Global software reset.
 	 */
-	msec_delay(50);
+	delay(50000);
 
 	/*
 	 * If SPI burst transaction was interrupted(before running the script),
@@ -2399,7 +1653,7 @@ aq1_mac_soft_reset_flb(struct aq_softc *sc)
 	AQ_WRITE_REG(sc, AQ_GLB_NVR_PROVISIONING2_REG, 0x00a0);
 	AQ_WRITE_REG(sc, AQ_GLB_NVR_INTERFACE1_REG, 0x009f);
 	AQ_WRITE_REG(sc, AQ_GLB_NVR_INTERFACE1_REG, 0x809f);
-	msec_delay(50);
+	delay(50000);
 
 	v = AQ_READ_REG(sc, AQ_FW_SOFTRESET_REG);
 	v &= ~AQ_FW_SOFTRESET_DIS;
@@ -2416,7 +1670,7 @@ aq1_mac_soft_reset_flb(struct aq_softc *sc)
 	 * For the case SPI burst transaction was interrupted (by MCP reset
 	 * above), wait until it is completed by hardware.
 	 */
-	msec_delay(50);
+	delay(50000);
 
 	/* MAC Kickstart */
 	if (!sc->sc_fast_start_enabled) {
@@ -2428,22 +1682,22 @@ aq1_mac_soft_reset_flb(struct aq_softc *sc)
 			    FW_MPI_DAISY_CHAIN_STATUS_REG) & 0x10;
 			if (flb_status != 0)
 				break;
-			msec_delay(1);
+			delay(1000);
 		}
 		if (flb_status == 0) {
-			aprint_error_dev(sc->sc_dev,
-			    "FLB> MAC kickstart failed: timed out\n");
+			printf("%s: FLB> MAC kickstart failed: timed out\n",
+			    DEVNAME(sc));
 			return ETIMEDOUT;
 		}
-		aprint_debug_dev(sc->sc_dev,
-		    "FLB> MAC kickstart done, %d ms\n", timo);
+		DPRINTF(("%s: FLB> MAC kickstart done, %d ms\n", DEVNAME(sc),
+		    timo));
 		/* FW reset */
 		AQ_WRITE_REG(sc, AQ_FW_GLB_CTL2_REG, 0x80e0);
 		/*
 		 * Let Felicity hardware complete SMBUS transaction before
 		 * Global software reset.
 		 */
-		msec_delay(50);
+		delay(50000);
 		sc->sc_fast_start_enabled = true;
 	}
 	AQ_WRITE_REG(sc, AQ_FW_GLB_CPU_SEM_REG(0), 1);
@@ -2454,19 +1708,20 @@ aq1_mac_soft_reset_flb(struct aq_softc *sc)
 	for (timo = 0; timo < 1000; timo++) {
 		if (AQ_READ_REG(sc, AQ_FW_VERSION_REG) != 0)
 			break;
-		msec_delay(10);
+		delay(10000);
 	}
 	if (timo >= 1000) {
-		aprint_error_dev(sc->sc_dev, "FLB> Global Soft Reset failed\n");
+		printf("%s: FLB> Global Soft Reset failed\n", DEVNAME(sc));
 		return ETIMEDOUT;
 	}
-	aprint_debug_dev(sc->sc_dev, "FLB> F/W restart: %d ms\n", timo * 10);
+	DPRINTF(("%s: FLB> F/W restart: %d ms\n", DEVNAME(sc), timo * 10));
+
 	return 0;
 
 }
 
-static int
-aq1_mac_soft_reset(struct aq_softc *sc, aq_fw_bootloader_mode_t *mode)
+int
+aq1_mac_soft_reset(struct aq_softc *sc, enum aq_fw_bootloader_mode *mode)
 {
 	if (sc->sc_rbl_enabled)
 		return aq1_mac_soft_reset_rbl(sc, mode);
@@ -2476,11 +1731,27 @@ aq1_mac_soft_reset(struct aq_softc *sc, aq_fw_bootloader_mode_t *mode)
 	return aq1_mac_soft_reset_flb(sc);
 }
 
-static int
+void
+aq1_global_software_reset(struct aq_softc *sc)
+{
+        uint32_t v;
+
+        AQ_WRITE_REG_BIT(sc, RX_SYSCONTROL_REG, RX_SYSCONTROL_RESET_DIS, 0);
+        AQ_WRITE_REG_BIT(sc, TX_SYSCONTROL_REG, TX_SYSCONTROL_RESET_DIS, 0);
+        AQ_WRITE_REG_BIT(sc, FW_MPI_RESETCTRL_REG,
+            FW_MPI_RESETCTRL_RESET_DIS, 0);
+
+        v = AQ_READ_REG(sc, AQ_FW_SOFTRESET_REG);
+        v &= ~AQ_FW_SOFTRESET_DIS;
+        v |= AQ_FW_SOFTRESET_RESET;
+        AQ_WRITE_REG(sc, AQ_FW_SOFTRESET_REG, v);
+}
+
+int
 aq1_fw_read_version(struct aq_softc *sc)
 {
 	int i, error = EBUSY;
-#define MAC_FW_START_TIMEOUT_MS	10000
+#define MAC_FW_START_TIMEOUT_MS 10000
 	for (i = 0; i < MAC_FW_START_TIMEOUT_MS; i++) {
 		sc->sc_fw_version = AQ_READ_REG(sc, AQ_FW_VERSION_REG);
 		if (sc->sc_fw_version != 0) {
@@ -2492,86 +1763,230 @@ aq1_fw_read_version(struct aq_softc *sc)
 	return error;
 }
 
-static int
-aq1_fw_reboot(struct aq_softc *sc)
+int
+aq1_fw_version_init(struct aq_softc *sc)
 {
-	uint32_t ver, v, bootExitCode;
-	int i, error;
+	int error = 0;
+	char fw_vers[sizeof("F/W version xxxxx.xxxxx.xxxxx")];
 
-	ver = AQ_READ_REG(sc, AQ_FW_VERSION_REG);
+	if (FW_VERSION_MAJOR(sc) == 1) {
+		sc->sc_fw_ops = &aq_fw1x_ops;
+	} else if ((FW_VERSION_MAJOR(sc) == 2) || (FW_VERSION_MAJOR(sc) == 3)) {
+		sc->sc_fw_ops = &aq_fw2x_ops;
+	} else {
+		printf(": Unsupported F/W version %d.%d.%d\n",
+		    FW_VERSION_MAJOR(sc), FW_VERSION_MINOR(sc),
+		    FW_VERSION_BUILD(sc));
+		return ENOTSUP;
+	}
+	snprintf(fw_vers, sizeof(fw_vers), "F/W version %d.%d.%d",
+	    FW_VERSION_MAJOR(sc), FW_VERSION_MINOR(sc), FW_VERSION_BUILD(sc));
 
-	for (i = 1000; i > 0; i--) {
-		v = AQ_READ_REG(sc, FW_MPI_DAISY_CHAIN_STATUS_REG);
-		bootExitCode = AQ_READ_REG(sc, FW_BOOT_EXIT_CODE_REG);
-		if (v != 0x06000000 || bootExitCode != 0)
+	/* detect revision */
+	uint32_t hwrev = AQ_READ_REG(sc, AQ_HW_REVISION_REG);
+	switch (hwrev & 0x0000000f) {
+	case 0x01:
+		printf(", Atlantic A0, %s", fw_vers);
+		sc->sc_features |= FEATURES_AQ1_REV_A0 |
+		    FEATURES_MPI_AQ | FEATURES_MIPS;
+		break;
+	case 0x02:
+		printf(", Atlantic B0, %s", fw_vers);
+		sc->sc_features |= FEATURES_AQ1_REV_B0 |
+		    FEATURES_MPI_AQ | FEATURES_MIPS |
+		    FEATURES_TPO2 | FEATURES_RPF2;
+		break;
+	case 0x0A:
+		printf(", Atlantic B1, %s", fw_vers);
+		sc->sc_features |= FEATURES_AQ1_REV_B1 |
+		    FEATURES_MPI_AQ | FEATURES_MIPS |
+		    FEATURES_TPO2 | FEATURES_RPF2;
+		break;
+	default:
+		printf(": Unknown revision (0x%08x)\n", hwrev);
+		error = ENOTSUP;
+		break;
+	}
+	return error;
+}
+
+int
+aq1_hw_init_ucp(struct aq_softc *sc)
+{
+	int timo;
+
+	if (FW_VERSION_MAJOR(sc) == 1) {
+		if (AQ_READ_REG(sc, FW1X_MPI_INIT2_REG) == 0) {
+			uint32_t data;
+			arc4random_buf(&data, sizeof(data));
+			data &= 0xfefefefe;
+			data |= 0x02020202;
+			AQ_WRITE_REG(sc, FW1X_MPI_INIT2_REG, data);
+		}
+		AQ_WRITE_REG(sc, FW1X_MPI_INIT1_REG, 0);
+	}
+
+	for (timo = 100; timo > 0; timo--) {
+		sc->sc_mbox_addr = AQ_READ_REG(sc, FW_MPI_MBOX_ADDR_REG);
+		if (sc->sc_mbox_addr != 0)
 			break;
-	}
-	if (i <= 0) {
-		aprint_error_dev(sc->sc_dev,
-		    "F/W reset failed. Neither RBL nor FLB started\n");
-		return ETIMEDOUT;
-	}
-	sc->sc_rbl_enabled = (bootExitCode != 0);
-
-	/*
-	 * Having FW version 0 is an indicator that cold start
-	 * is in progress. This means two things:
-	 * 1) Driver have to wait for FW/HW to finish boot (500ms giveup)
-	 * 2) Driver may skip reset sequence and save time.
-	 */
-	if (sc->sc_fast_start_enabled && (ver != 0)) {
-		error = aq1_fw_read_version(sc);
-		/* Skip reset as it just completed */
-		if (error == 0)
-			return 0;
+		delay(1000);
 	}
 
-	aq_fw_bootloader_mode_t mode = FW_BOOT_MODE_UNKNOWN;
-	error = aq1_mac_soft_reset(sc, &mode);
-	if (error != 0) {
-		aprint_error_dev(sc->sc_dev, "MAC reset failed: %d\n", error);
-		return ENXIO;
-	}
-
-	switch (mode) {
-	case FW_BOOT_MODE_FLB:
-		aprint_debug_dev(sc->sc_dev,
-		    "FLB> F/W successfully loaded from flash.\n");
-		sc->sc_flash_present = true;
-		break;
-	case FW_BOOT_MODE_RBL_FLASH:
-		aprint_debug_dev(sc->sc_dev,
-		    "RBL> F/W loaded from flash. Host Bootload disabled.\n");
-		sc->sc_flash_present = true;
-		break;
-	case FW_BOOT_MODE_UNKNOWN:
-		aprint_error_dev(sc->sc_dev,
-		    "F/W bootload error: unknown bootloader type\n");
-		return ENOTSUP;
-	case FW_BOOT_MODE_RBL_HOST_BOOTLOAD:
-		aprint_debug_dev(sc->sc_dev, "RBL> Host Bootload mode\n");
-		aprint_error_dev(sc->sc_dev,
-		    "RBL> F/W Host Bootload not implemented\n");
+#define AQ_FW_MIN_VERSION	0x01050006
+#define AQ_FW_MIN_VERSION_STR	"1.5.6"
+	if (sc->sc_fw_version < AQ_FW_MIN_VERSION) {
+		printf("%s: atlantic: wrong FW version: " AQ_FW_MIN_VERSION_STR
+		    " or later required, this is %d.%d.%d\n",
+		    DEVNAME(sc),
+		    FW_VERSION_MAJOR(sc),
+		    FW_VERSION_MINOR(sc),
+		    FW_VERSION_BUILD(sc));
 		return ENOTSUP;
 	}
 
-	error = aq1_fw_read_version(sc);
-	if (error != 0)
-		return error;
+	if (sc->sc_mbox_addr == 0)
+		printf("%s: NULL MBOX!!\n", DEVNAME(sc));
 
-	error = aq1_fw_version_init(sc);
-	if (error != 0)
-		return error;
-
-	error = aq1_hw_init_ucp(sc);
-	if (error < 0)
-		return error;
-
-	KASSERT(sc->sc_mbox_addr != 0);
 	return 0;
 }
 
-static int
+int
+aq2_interface_buffer_read(struct aq_softc *sc, uint32_t reg0, uint32_t *data0,
+    uint32_t size0)
+{
+	uint32_t tid0, tid1, reg, *data, size;
+	int timo;
+
+	for (timo = 10000; timo > 0; timo--) {
+		tid0 = AQ_READ_REG(sc, AQ2_FW_INTERFACE_OUT_TRANSACTION_ID_REG);
+		if (((tid0 & AQ2_FW_INTERFACE_OUT_TRANSACTION_ID_A)
+		    >> AQ2_FW_INTERFACE_OUT_TRANSACTION_ID_A_S) !=
+		    ((tid0 & AQ2_FW_INTERFACE_OUT_TRANSACTION_ID_B)
+		    >> AQ2_FW_INTERFACE_OUT_TRANSACTION_ID_B_S)) {
+			delay(10);
+			continue;
+		}
+
+		for (reg = reg0, data = data0, size = size0;
+		    size >= 4; reg += 4, data++, size -= 4) {
+			*data = AQ_READ_REG(sc, reg);
+		}
+
+		tid1 = AQ_READ_REG(sc, AQ2_FW_INTERFACE_OUT_TRANSACTION_ID_REG);
+		if (tid0 == tid1)
+			break;
+	}
+	if (timo == 0) {
+		printf("%s: interface buffer read timeout\n", DEVNAME(sc));
+		return ETIMEDOUT;
+	}
+	return 0;
+}
+
+int
+aq2_fw_reboot(struct aq_softc *sc)
+{
+	uint32_t v;
+	int timo, err;
+	char buf[32];
+	uint32_t filter_caps[3];
+
+	sc->sc_fw_ops = &aq2_fw_ops;
+	sc->sc_features = FEATURES_AQ2;
+
+	AQ_WRITE_REG(sc, AQ2_MCP_HOST_REQ_INT_CLR_REG, 1);
+	AQ_WRITE_REG(sc, AQ2_MIF_BOOT_REG, 1);	/* reboot request */
+	for (timo = 200000; timo > 0; timo--) {
+		v = AQ_READ_REG(sc, AQ2_MIF_BOOT_REG);
+		if ((v & AQ2_MIF_BOOT_BOOT_STARTED) && v != 0xffffffff)
+			break;
+		delay(10);
+	}
+	if (timo <= 0) {
+		printf(": FW reboot timeout\n");
+		return ETIMEDOUT;
+	}
+
+	for (timo = 2000000; timo > 0; timo--) {
+		v = AQ_READ_REG(sc, AQ2_MIF_BOOT_REG);
+		if ((v & AQ2_MIF_BOOT_FW_INIT_FAILED) ||
+		    (v & AQ2_MIF_BOOT_FW_INIT_COMP_SUCCESS))
+			break;
+		v = AQ_READ_REG(sc, AQ2_MCP_HOST_REQ_INT_REG);
+		if (v & AQ2_MCP_HOST_REQ_INT_READY)
+			break;
+		delay(10);
+	}
+	if (timo <= 0) {
+		printf(": FW restart timeout\n");
+		return ETIMEDOUT;
+	}
+
+	v = AQ_READ_REG(sc, AQ2_MIF_BOOT_REG);
+	if (v & AQ2_MIF_BOOT_FW_INIT_FAILED) {
+		printf(": FW restart failed\n");
+		return ETIMEDOUT;
+	}
+
+	v = AQ_READ_REG(sc, AQ2_MCP_HOST_REQ_INT_REG);
+	if (v & AQ2_MCP_HOST_REQ_INT_READY) {
+		printf(": firmware required\n");
+		return ENXIO;
+	}
+
+	/*
+	 * Get aq2 firmware version.
+	 * Note that the bit layout and its meaning are different from aq1.
+	 */
+	err = aq2_interface_buffer_read(sc, AQ2_FW_INTERFACE_OUT_VERSION_BUNDLE_REG,
+	    (uint32_t *)&v, sizeof(v));
+	if (err != 0)
+		return err;
+
+	sc->sc_fw_version =
+	    (((v & AQ2_FW_INTERFACE_OUT_VERSION_MAJOR) >>
+		AQ2_FW_INTERFACE_OUT_VERSION_MAJOR_S) << 24) |
+	    (((v & AQ2_FW_INTERFACE_OUT_VERSION_MINOR) >>
+		AQ2_FW_INTERFACE_OUT_VERSION_MINOR_S) << 16) |
+	    (((v & AQ2_FW_INTERFACE_OUT_VERSION_BUILD) >>
+		AQ2_FW_INTERFACE_OUT_VERSION_BUILD_S));
+
+	err = aq2_interface_buffer_read(sc, AQ2_FW_INTERFACE_OUT_VERSION_IFACE_REG,
+	    (uint32_t *)&v, sizeof(v));
+	if (err != 0)
+		return err;
+
+	switch (v & AQ2_FW_INTERFACE_OUT_VERSION_IFACE_VER) {
+	case AQ2_FW_INTERFACE_OUT_VERSION_IFACE_VER_A0:
+		sc->sc_features |= FEATURES_AQ2_IFACE_A0;
+		strncpy(buf, "A0", sizeof(buf));
+		break;
+	case AQ2_FW_INTERFACE_OUT_VERSION_IFACE_VER_B0:
+		sc->sc_features |= FEATURES_AQ2_IFACE_B0;
+		strncpy(buf, "B0", sizeof(buf));
+		break;
+	default:
+		snprintf(buf, sizeof(buf), "(unknown 0x%08x)", v);
+		break;
+	}
+	printf(", Atlantic2 %s, F/W version %d.%d.%d", buf,
+	    FW_VERSION_MAJOR(sc), FW_VERSION_MINOR(sc), FW_VERSION_BUILD(sc));
+
+	aq2_interface_buffer_read(sc, AQ2_FW_INTERFACE_OUT_FILTER_CAPS_REG,
+	    filter_caps, sizeof(filter_caps));
+	sc->sc_art_filter_base_index = ((filter_caps[2] &
+	    AQ2_FW_INTERFACE_OUT_FILTER_CAPS3_RESOLVER_BASE_INDEX) >>
+	    AQ2_FW_INTERFACE_OUT_FILTER_CAPS3_RESOLVER_BASE_INDEX_SHIFT) * 8;
+
+	/* debug info */
+	v = AQ_READ_REG(sc, AQ_HW_REVISION_REG);
+	DPRINTF(("%s: HW Rev: 0x%08x\n", DEVNAME(sc), v));
+
+	return 0;
+}
+
+int
 aq_hw_reset(struct aq_softc *sc)
 {
 	int error;
@@ -2587,468 +2002,79 @@ aq_hw_reset(struct aq_softc *sc)
 	    (AQ_READ_REG(sc, AQ_INTR_CTRL_REG) & AQ_INTR_CTRL_RESET_IRQ) == 0,
 	    1000, 10, &error);
 	if (error != 0) {
-		aprint_error_dev(sc->sc_dev,
-		    "atlantic: IRQ reset failed: %d\n", error);
+		printf(": IRQ reset failed: %d\n", error);
 		return error;
 	}
 
 	return sc->sc_fw_ops->reset(sc);
 }
 
-static int
-aq1_hw_init_ucp(struct aq_softc *sc)
+int
+aq1_get_mac_addr(struct aq_softc *sc)
 {
-	int timo;
+	uint32_t mac_addr[2];
+	uint32_t efuse_shadow_addr;
+	int err;
 
-	if (FW_VERSION_MAJOR(sc) == 1) {
-		if (AQ_READ_REG(sc, FW1X_MPI_INIT2_REG) == 0)
-			AQ_WRITE_REG(sc, FW1X_MPI_INIT2_REG, 0xfefefefe);
-		AQ_WRITE_REG(sc, FW1X_MPI_INIT1_REG, 0);
-	}
+	efuse_shadow_addr = 0;
+	if (FW_VERSION_MAJOR(sc) >= 2)
+		efuse_shadow_addr = AQ_READ_REG(sc, FW2X_MPI_EFUSEADDR_REG);
+	else
+		efuse_shadow_addr = AQ_READ_REG(sc, FW1X_MPI_EFUSEADDR_REG);
 
-	/* Wait a maximum of 10sec. It usually takes about 5sec. */
-	for (timo = 10000; timo > 0; timo--) {
-		sc->sc_mbox_addr = AQ_READ_REG(sc, FW_MPI_MBOX_ADDR_REG);
-		if (sc->sc_mbox_addr != 0)
-			break;
-		delay(1000);
-	}
-	if (sc->sc_mbox_addr == 0) {
-		aprint_error_dev(sc->sc_dev, "cannot get mbox addr\n");
-		return ETIMEDOUT;
+	if (efuse_shadow_addr == 0) {
+		printf(": cannot get efuse addr\n");
+		return ENXIO;
 	}
 
-#define AQ_FW_MIN_VERSION	0x01050006
-#define AQ_FW_MIN_VERSION_STR	"1.5.6"
-	if (sc->sc_fw_version < AQ_FW_MIN_VERSION) {
-		aprint_error_dev(sc->sc_dev,
-		    "atlantic: wrong FW version: " AQ_FW_MIN_VERSION_STR
-		    " or later required, this is %d.%d.%d\n",
-		    FW_VERSION_MAJOR(sc),
-		    FW_VERSION_MINOR(sc),
-		    FW_VERSION_BUILD(sc));
-		return ENOTSUP;
+	DPRINTF(("%s: efuse_shadow_addr = %x\n", DEVNAME(sc), efuse_shadow_addr));
+
+	memset(mac_addr, 0, sizeof(mac_addr));
+	err = aq1_fw_downld_dwords(sc, efuse_shadow_addr + (40 * 4),
+	    mac_addr, 2);
+	if (err < 0)
+		return err;
+
+	if (mac_addr[0] == 0 && mac_addr[1] == 0) {
+		printf(": mac address not found\n");
+		return ENXIO;
 	}
+
+	DPRINTF(("%s: mac0 %x mac1 %x\n", DEVNAME(sc), mac_addr[0],
+	    mac_addr[1]));
+
+	mac_addr[0] = htobe32(mac_addr[0]);
+	mac_addr[1] = htobe32(mac_addr[1]);
+
+	DPRINTF(("%s: mac0 %x mac1 %x\n", DEVNAME(sc), mac_addr[0],
+	    mac_addr[1]));
+
+	memcpy(sc->sc_enaddr.ether_addr_octet,
+	    (uint8_t *)mac_addr, ETHER_ADDR_LEN);
 
 	return 0;
 }
 
-static int
-aq1_fw_version_init(struct aq_softc *sc)
+int
+aq_activate(struct device *self, int act)
 {
-	int error = 0;
-	char fw_vers[sizeof("F/W version xxxxx.xxxxx.xxxxx")];
-
-	if (FW_VERSION_MAJOR(sc) == 1) {
-		sc->sc_fw_ops = &aq_fw1x_ops;
-	} else if ((FW_VERSION_MAJOR(sc) == 2) || (FW_VERSION_MAJOR(sc) == 3)) {
-		sc->sc_fw_ops = &aq_fw2x_ops;
-	} else {
-		aprint_error_dev(sc->sc_dev,
-		    "Unsupported F/W version %d.%d.%d\n",
-		    FW_VERSION_MAJOR(sc), FW_VERSION_MINOR(sc),
-		    FW_VERSION_BUILD(sc));
-		return ENOTSUP;
-	}
-	snprintf(fw_vers, sizeof(fw_vers), "F/W version %d.%d.%d",
-	    FW_VERSION_MAJOR(sc), FW_VERSION_MINOR(sc), FW_VERSION_BUILD(sc));
-
-	/* detect revision */
-	uint32_t hwrev = AQ_READ_REG(sc, AQ_HW_REVISION_REG);
-	switch (hwrev & 0x0000000f) {
-	case 0x01:
-		aprint_normal_dev(sc->sc_dev, "Atlantic revision A0, %s\n",
-		    fw_vers);
-		sc->sc_features |= FEATURES_AQ1_REV_A0 |
-		    FEATURES_MPI_AQ | FEATURES_MIPS;
-		sc->sc_max_mtu = AQ1_JUMBO_MTU_REV_A;
-		break;
-	case 0x02:
-		aprint_normal_dev(sc->sc_dev, "Atlantic revision B0, %s\n",
-		    fw_vers);
-		sc->sc_features |= FEATURES_AQ1_REV_B0 |
-		    FEATURES_MPI_AQ | FEATURES_MIPS |
-		    FEATURES_TPO2 | FEATURES_RPF2;
-		sc->sc_max_mtu = AQ1_JUMBO_MTU_REV_B;
-		break;
-	case 0x0A:
-		aprint_normal_dev(sc->sc_dev, "Atlantic revision B1, %s\n",
-		    fw_vers);
-		sc->sc_features |= FEATURES_AQ1_REV_B1 |
-		    FEATURES_MPI_AQ | FEATURES_MIPS |
-		    FEATURES_TPO2 | FEATURES_RPF2;
-		sc->sc_max_mtu = AQ1_JUMBO_MTU_REV_B;
-		break;
-	default:
-		aprint_error_dev(sc->sc_dev,
-		    "Unknown revision (0x%08x)\n", hwrev);
-		sc->sc_features = 0;
-		sc->sc_max_mtu = ETHERMTU;
-		error = ENOTSUP;
-		break;
-	}
-	return error;
-}
-
-static int
-fw1x_reset(struct aq_softc *sc)
-{
-	struct aq_mailbox_header mbox;
-	const int retryCount = 1000;
-	uint32_t tid0;
-	int i;
-
-	tid0 = ~0;	/*< Initial value of MBOX transactionId. */
-
-	for (i = 0; i < retryCount; ++i) {
-		/*
-		 * Read the beginning of Statistics structure to capture
-		 * the Transaction ID.
-		 */
-		aq1_fw_downld_dwords(sc, sc->sc_mbox_addr,
-		    (uint32_t *)&mbox, sizeof(mbox) / sizeof(uint32_t));
-
-		/* Successfully read the stats. */
-		if (tid0 == ~0U) {
-			/* We have read the initial value. */
-			tid0 = mbox.transaction_id;
-			continue;
-		} else if (mbox.transaction_id != tid0) {
-			/*
-			 * Compare transaction ID to initial value.
-			 * If it's different means f/w is alive.
-			 * We're done.
-			 */
-			return 0;
-		}
-
-		/*
-		 * Transaction ID value haven't changed since last time.
-		 * Try reading the stats again.
-		 */
-		delay(10);
-	}
-	aprint_error_dev(sc->sc_dev, "F/W 1.x reset finalize timeout\n");
-	return EBUSY;
-}
-
-static int
-fw1x_set_mode(struct aq_softc *sc, aq_hw_fw_mpi_state_t mode,
-    aq_link_speed_t speed, aq_link_fc_t fc, aq_link_eee_t eee)
-{
-	uint32_t mpictrl = 0;
-	uint32_t mpispeed = 0;
-
-	if (speed & AQ_LINK_10G)
-		mpispeed |= FW1X_CTRL_10G;
-	if (speed & AQ_LINK_5G)
-		mpispeed |= (FW1X_CTRL_5G | FW1X_CTRL_5GSR);
-	if (speed & AQ_LINK_2G5)
-		mpispeed |= FW1X_CTRL_2G5;
-	if (speed & AQ_LINK_1G)
-		mpispeed |= FW1X_CTRL_1G;
-	if (speed & AQ_LINK_100M)
-		mpispeed |= FW1X_CTRL_100M;
-
-	mpictrl |= __SHIFTIN(mode, FW1X_MPI_STATE_MODE);
-	mpictrl |= __SHIFTIN(mpispeed, FW1X_MPI_STATE_SPEED);
-	AQ_WRITE_REG(sc, FW1X_MPI_CONTROL_REG, mpictrl);
 	return 0;
 }
 
-static int
-fw1x_get_mode(struct aq_softc *sc, aq_hw_fw_mpi_state_t *modep,
-    aq_link_speed_t *speedp, aq_link_fc_t *fcp, aq_link_eee_t *eeep)
-{
-	uint32_t mpistate, mpi_speed;
-	aq_link_speed_t speed = AQ_LINK_NONE;
-
-	mpistate = AQ_READ_REG(sc, FW1X_MPI_STATE_REG);
-
-	if (modep != NULL)
-		*modep = __SHIFTOUT(mpistate, FW1X_MPI_STATE_MODE);
-
-	mpi_speed = __SHIFTOUT(mpistate, FW1X_MPI_STATE_SPEED);
-	if (mpi_speed & FW1X_CTRL_10G)
-		speed = AQ_LINK_10G;
-	else if (mpi_speed & (FW1X_CTRL_5G|FW1X_CTRL_5GSR))
-		speed = AQ_LINK_5G;
-	else if (mpi_speed & FW1X_CTRL_2G5)
-		speed = AQ_LINK_2G5;
-	else if (mpi_speed & FW1X_CTRL_1G)
-		speed = AQ_LINK_1G;
-	else if (mpi_speed & FW1X_CTRL_100M)
-		speed = AQ_LINK_100M;
-
-	if (speedp != NULL)
-		*speedp = speed;
-
-	if (fcp != NULL)
-		*fcp = AQ_FC_NONE;
-
-	if (eeep != NULL)
-		*eeep = AQ_EEE_DISABLE;
-
-	return 0;
-}
-
-static int
-fw1x_get_stats(struct aq_softc *sc, aq_hw_stats_s_t *stats)
-{
-	int error;
-
-	error = aq1_fw_downld_dwords(sc,
-	    sc->sc_mbox_addr + offsetof(fw1x_mailbox_t, msm), (uint32_t *)stats,
-	    sizeof(aq_hw_stats_s_t) / sizeof(uint32_t));
-	if (error < 0) {
-		device_printf(sc->sc_dev,
-		    "fw1x> download statistics data FAILED, error %d", error);
-		return error;
-	}
-
-	stats->dpc = AQ_READ_REG(sc, RX_DMA_DROP_PKT_CNT_REG);
-	stats->cprc = AQ_READ_REG(sc, RX_DMA_COALESCED_PKT_CNT_REG);
-	return 0;
-}
-
-static int
-fw2x_reset(struct aq_softc *sc)
-{
-	fw2x_capabilities_t caps = { 0 };
-	int error;
-
-	error = aq1_fw_downld_dwords(sc,
-	    sc->sc_mbox_addr + offsetof(fw2x_mailbox_t, caps),
-	    (uint32_t *)&caps, sizeof caps / sizeof(uint32_t));
-	if (error != 0) {
-		aprint_error_dev(sc->sc_dev,
-		    "fw2x> can't get F/W capabilities mask, error %d\n",
-		    error);
-		return error;
-	}
-	sc->sc_fw_caps = caps.caps_lo | ((uint64_t)caps.caps_hi << 32);
-
-	char buf[256];
-	snprintb(buf, sizeof(buf), FW2X_SNPRINTB, sc->sc_fw_caps);
-	aprint_verbose_dev(sc->sc_dev, "fw2x> F/W capabilities=%s\n", buf);
-
-	return 0;
-}
-
-static int
-fw2x_set_mode(struct aq_softc *sc, aq_hw_fw_mpi_state_t mode,
-    aq_link_speed_t speed, aq_link_fc_t fc, aq_link_eee_t eee)
-{
-	uint64_t mpi_ctrl;
-	int error = 0;
-
-	AQ_MPI_LOCK(sc);
-
-	mpi_ctrl = AQ_READ64_REG(sc, FW2X_MPI_CONTROL_REG);
-
-	switch (mode) {
-	case MPI_INIT:
-		mpi_ctrl &= ~FW2X_CTRL_RATE_MASK;
-		if (speed & AQ_LINK_10G)
-			mpi_ctrl |= FW2X_CTRL_RATE_10G;
-		if (speed & AQ_LINK_5G)
-			mpi_ctrl |= FW2X_CTRL_RATE_5G;
-		if (speed & AQ_LINK_2G5)
-			mpi_ctrl |= FW2X_CTRL_RATE_2G5;
-		if (speed & AQ_LINK_1G)
-			mpi_ctrl |= FW2X_CTRL_RATE_1G;
-		if (speed & AQ_LINK_100M)
-			mpi_ctrl |= FW2X_CTRL_RATE_100M;
-
-		mpi_ctrl &= ~FW2X_CTRL_LINK_DROP;
-
-		mpi_ctrl &= ~FW2X_CTRL_EEE_MASK;
-		if (eee == AQ_EEE_ENABLE)
-			mpi_ctrl |= FW2X_CTRL_EEE_MASK;
-
-		mpi_ctrl &= ~(FW2X_CTRL_PAUSE | FW2X_CTRL_ASYMMETRIC_PAUSE);
-		if (fc & AQ_FC_RX)
-			mpi_ctrl |= FW2X_CTRL_PAUSE;
-		if (fc & AQ_FC_TX)
-			mpi_ctrl |= FW2X_CTRL_ASYMMETRIC_PAUSE;
-		break;
-	case MPI_DEINIT:
-		mpi_ctrl &= ~(FW2X_CTRL_RATE_MASK | FW2X_CTRL_EEE_MASK);
-		mpi_ctrl &= ~(FW2X_CTRL_PAUSE | FW2X_CTRL_ASYMMETRIC_PAUSE);
-		break;
-	default:
-		device_printf(sc->sc_dev, "fw2x> unknown MPI state %d\n", mode);
-		error =  EINVAL;
-		goto failure;
-	}
-	AQ_WRITE64_REG(sc, FW2X_MPI_CONTROL_REG, mpi_ctrl);
-
- failure:
-	AQ_MPI_UNLOCK(sc);
-	return error;
-}
-
-static int
-fw2x_get_mode(struct aq_softc *sc, aq_hw_fw_mpi_state_t *modep,
-    aq_link_speed_t *speedp, aq_link_fc_t *fcp, aq_link_eee_t *eeep)
-{
-	uint64_t mpi_state = AQ_READ64_REG(sc, FW2X_MPI_STATE_REG);
-
-	if (modep != NULL) {
-		uint64_t mpi_ctrl = AQ_READ64_REG(sc, FW2X_MPI_CONTROL_REG);
-		if (mpi_ctrl & FW2X_CTRL_RATE_MASK)
-			*modep = MPI_INIT;
-		else
-			*modep = MPI_DEINIT;
-	}
-
-	aq_link_speed_t speed = AQ_LINK_NONE;
-	if (mpi_state & FW2X_CTRL_RATE_10G)
-		speed = AQ_LINK_10G;
-	else if (mpi_state & FW2X_CTRL_RATE_5G)
-		speed = AQ_LINK_5G;
-	else if (mpi_state & FW2X_CTRL_RATE_2G5)
-		speed = AQ_LINK_2G5;
-	else if (mpi_state & FW2X_CTRL_RATE_1G)
-		speed = AQ_LINK_1G;
-	else if (mpi_state & FW2X_CTRL_RATE_100M)
-		speed = AQ_LINK_100M;
-
-	if (speedp != NULL)
-		*speedp = speed;
-
-	aq_link_fc_t fc = AQ_FC_NONE;
-	if (mpi_state & FW2X_CTRL_PAUSE)
-		fc |= AQ_FC_RX;
-	if (mpi_state & FW2X_CTRL_ASYMMETRIC_PAUSE)
-		fc |= AQ_FC_TX;
-	if (fcp != NULL)
-		*fcp = fc;
-
-	/* XXX: TODO: EEE */
-	if (eeep != NULL)
-		*eeep = AQ_EEE_DISABLE;
-
-	return 0;
-}
-
-static int
-toggle_mpi_ctrl_and_wait(struct aq_softc *sc, uint64_t mask,
-    uint32_t timeout_ms, uint32_t try_count)
-{
-	uint64_t mpi_ctrl = AQ_READ64_REG(sc, FW2X_MPI_CONTROL_REG);
-	uint64_t mpi_state = AQ_READ64_REG(sc, FW2X_MPI_STATE_REG);
-	int error;
-
-	/* First, check that control and state values are consistent */
-	if ((mpi_ctrl & mask) != (mpi_state & mask)) {
-		device_printf(sc->sc_dev,
-		    "fw2x> MPI control (%#llx) and state (%#llx)"
-		    " are not consistent for mask %#llx!\n",
-		    (unsigned long long)mpi_ctrl, (unsigned long long)mpi_state,
-		    (unsigned long long)mask);
-		return EINVAL;
-	}
-
-	/* Invert bits (toggle) in control register */
-	mpi_ctrl ^= mask;
-	AQ_WRITE64_REG(sc, FW2X_MPI_CONTROL_REG, mpi_ctrl);
-
-	/* Clear all bits except masked */
-	mpi_ctrl &= mask;
-
-	/* Wait for FW reflecting change in state register */
-	WAIT_FOR((AQ_READ64_REG(sc, FW2X_MPI_CONTROL_REG) & mask) == mpi_ctrl,
-	    1000 * timeout_ms, try_count, &error);
-	if (error != 0) {
-		device_printf(sc->sc_dev,
-		    "f/w2x> timeout while waiting for response"
-		    " in state register for bit %#llx!",
-		    (unsigned long long)mask);
-		return error;
-	}
-	return 0;
-}
-
-static int
-fw2x_get_stats(struct aq_softc *sc, aq_hw_stats_s_t *stats)
-{
-	int error;
-
-	AQ_MPI_LOCK(sc);
-	/* Say to F/W to update the statistics */
-	error = toggle_mpi_ctrl_and_wait(sc, FW2X_CTRL_STATISTICS, 1, 25);
-	if (error != 0) {
-		device_printf(sc->sc_dev,
-		    "fw2x> statistics update error %d\n", error);
-		goto failure;
-	}
-
-	CTASSERT(sizeof(fw2x_msm_statistics_t) <= sizeof(struct aq_hw_stats_s));
-	error = aq1_fw_downld_dwords(sc,
-	    sc->sc_mbox_addr + offsetof(fw2x_mailbox_t, msm), (uint32_t *)stats,
-	    sizeof(fw2x_msm_statistics_t) / sizeof(uint32_t));
-	if (error != 0) {
-		device_printf(sc->sc_dev,
-		    "fw2x> download statistics data FAILED, error %d", error);
-		goto failure;
-	}
-	stats->dpc = AQ_READ_REG(sc, RX_DMA_DROP_PKT_CNT_REG);
-	stats->cprc = AQ_READ_REG(sc, RX_DMA_COALESCED_PKT_CNT_REG);
-
- failure:
-	AQ_MPI_UNLOCK(sc);
-	return error;
-}
-
-// #if NSYSMON_ENVSYS > 0
-// static int
-// fw2x_get_temperature(struct aq_softc *sc, uint32_t *temp)
-// {
-// 	int error;
-// 	uint32_t value, celsius;
-
-// 	AQ_MPI_LOCK(sc);
-
-// 	/* Say to F/W to update the temperature */
-// 	error = toggle_mpi_ctrl_and_wait(sc, FW2X_CTRL_TEMPERATURE, 1, 25);
-// 	if (error != 0)
-// 		goto failure;
-
-// 	error = aq1_fw_downld_dwords(sc,
-// 	    sc->sc_mbox_addr + offsetof(fw2x_mailbox_t, phy_info2),
-// 	    &value, sizeof(value) / sizeof(uint32_t));
-// 	if (error != 0)
-// 		goto failure;
-
-// 	/* 1/256 decrees C to microkelvin */
-// 	celsius = __SHIFTOUT(value, PHYINFO2_TEMPERATURE);
-// 	if (celsius == 0) {
-// 		error = EIO;
-// 		goto failure;
-// 	}
-// 	*temp = celsius * (1000000 / 256) + 273150000;
-
-//  failure:
-// 	AQ_MPI_UNLOCK(sc);
-// 	return 0;
-// }
-// #endif
-
-static int
+int
 aq1_fw_downld_dwords(struct aq_softc *sc, uint32_t addr, uint32_t *p,
     uint32_t cnt)
 {
 	uint32_t v;
 	int error = 0;
 
-	WAIT_FOR(AQ_READ_REG(sc, AQ1_FW_SEM_RAM_REG) == 1, 1, 10000, &error);
+	WAIT_FOR(AQ_READ_REG(sc, AQ_FW_SEM_RAM_REG) == 1, 1, 10000, &error);
 	if (error != 0) {
-		AQ_WRITE_REG(sc, AQ1_FW_SEM_RAM_REG, 1);
-		v = AQ_READ_REG(sc, AQ1_FW_SEM_RAM_REG);
+		AQ_WRITE_REG(sc, AQ_FW_SEM_RAM_REG, 1);
+		v = AQ_READ_REG(sc, AQ_FW_SEM_RAM_REG);
 		if (v == 0) {
-			device_printf(sc->sc_dev,
-			    "%s:%d: timeout\n", __func__, __LINE__);
+			printf("%s: %s:%d: timeout\n",
+			    DEVNAME(sc), __func__, __LINE__);
 			return ETIMEDOUT;
 		}
 	}
@@ -3071,429 +2097,118 @@ aq1_fw_downld_dwords(struct aq_softc *sc, uint32_t addr, uint32_t *p,
 		*p++ = AQ_READ_REG(sc, AQ_FW_MBOX_VAL_REG);
 		addr += sizeof(uint32_t);
 	}
-	AQ_WRITE_REG(sc, AQ1_FW_SEM_RAM_REG, 1);
+	AQ_WRITE_REG(sc, AQ_FW_SEM_RAM_REG, 1);
 
 	if (error != 0)
-		device_printf(sc->sc_dev,
-		    "%s:%d: timeout\n", __func__, __LINE__);
+		printf("%s: %s:%d: timeout\n",
+		    DEVNAME(sc), __func__, __LINE__);
 
 	return error;
 }
 
-/* read my mac address */
-static int
-aq1_get_mac_addr(struct aq_softc *sc)
+int
+aq_fw2x_reset(struct aq_softc *sc)
 {
-	uint32_t mac_addr[2];
-	uint32_t efuse_shadow_addr;
-	int err;
-
-	efuse_shadow_addr = 0;
-	if (FW_VERSION_MAJOR(sc) >= 2)
-		efuse_shadow_addr = AQ_READ_REG(sc, FW2X_MPI_EFUSEADDR_REG);
-	else
-		efuse_shadow_addr = AQ_READ_REG(sc, FW1X_MPI_EFUSEADDR_REG);
-
-	if (efuse_shadow_addr == 0) {
-		aprint_error_dev(sc->sc_dev, "cannot get efuse addr\n");
-		return ENXIO;
-	}
-
-	memset(mac_addr, 0, sizeof(mac_addr));
-	err = aq1_fw_downld_dwords(sc, efuse_shadow_addr + (40 * 4),
-	    mac_addr, __arraycount(mac_addr));
-	if (err < 0)
-		return err;
-
-	if (mac_addr[0] == 0 && mac_addr[1] == 0) {
-		aprint_error_dev(sc->sc_dev, "mac address not found\n");
-		return ENXIO;
-	}
-
-	mac_addr[0] = htobe32(mac_addr[0]);
-	mac_addr[1] = htobe32(mac_addr[1]);
-
-	memcpy(sc->sc_enaddr.ether_addr_octet,
-	    (uint8_t *)mac_addr, ETHER_ADDR_LEN);
-	aprint_normal_dev(sc->sc_dev, "Etheraddr: %s\n",
-	    ether_sprintf(sc->sc_enaddr.ether_addr_octet));
-
-	return 0;
-}
-
-/* set multicast filter. index 0 for own address */
-static int
-aq_set_mac_addr(struct aq_softc *sc, int index, uint8_t *enaddr)
-{
-	uint32_t h, l;
-
-	if (index >= AQ_HW_MAC_NUM(sc))
-		return EINVAL;
-
-	if (enaddr == NULL) {
-		/* disable */
-		AQ_WRITE_REG_BIT(sc,
-		    RPF_L2UC_MSW_REG(index), RPF_L2UC_MSW_EN, 0);
-		return 0;
-	}
-
-	h = (enaddr[0] << 8) | (enaddr[1]);
-	l = ((uint32_t)enaddr[2] << 24) | (enaddr[3] << 16) |
-	    (enaddr[4] << 8) | (enaddr[5]);
-
-	/* disable, set, and enable */
-	AQ_WRITE_REG_BIT(sc, RPF_L2UC_MSW_REG(index), RPF_L2UC_MSW_EN, 0);
-	AQ_WRITE_REG(sc, RPF_L2UC_LSW_REG(index), l);
-	AQ_WRITE_REG_BIT(sc, RPF_L2UC_MSW_REG(index),
-	    RPF_L2UC_MSW_MACADDR_HI, h);
-	AQ_WRITE_REG_BIT(sc, RPF_L2UC_MSW_REG(index),
-	    RPF_L2UC_MSW_ACTION, RPF_ACTION_HOST);
-	if (HWTYPE_AQ2_P(sc)) {
-		AQ_WRITE_REG_BIT(sc, RPF_L2UC_MSW_REG(index),
-		    RPF_L2UC_MSW_TAG, __SHIFTIN(1, AQ2_RPF_TAG_UC_MASK));
-	}
-	AQ_WRITE_REG_BIT(sc, RPF_L2UC_MSW_REG(index), RPF_L2UC_MSW_EN, 1);
-
-	return 0;
-}
-
-static int
-aq_set_capability(struct aq_softc *sc)
-{
-	struct ifnet * const ifp = &sc->sc_ethercom.ec_if;
-	int ip4csum_tx =
-	    ((ifp->if_capenable & IFCAP_CSUM_IPv4_Tx) == 0) ? 0 : 1;
-	int ip4csum_rx =
-	    ((ifp->if_capenable & IFCAP_CSUM_IPv4_Rx) == 0) ? 0 : 1;
-	int l4csum_tx = ((ifp->if_capenable &
-	   (IFCAP_CSUM_TCPv4_Tx | IFCAP_CSUM_UDPv4_Tx |
-	   IFCAP_CSUM_TCPv6_Tx | IFCAP_CSUM_UDPv6_Tx)) == 0) ? 0 : 1;
-	int l4csum_rx =
-	   ((ifp->if_capenable & (IFCAP_CSUM_TCPv4_Rx | IFCAP_CSUM_UDPv4_Rx |
-	   IFCAP_CSUM_TCPv6_Rx | IFCAP_CSUM_UDPv6_Rx)) == 0) ? 0 : 1;
-	uint32_t lso =
-	   ((ifp->if_capenable & (IFCAP_TSOv4 | IFCAP_TSOv6)) == 0) ?
-	   0 : 0xffffffff;
-	uint32_t lro = ((ifp->if_capenable & IFCAP_LRO) == 0) ?
-	    0 : 0xffffffff;
-	uint32_t i, v;
-
-	/* TX checksums offloads*/
-	AQ_WRITE_REG_BIT(sc, TPO_HWCSUM_REG, TPO_HWCSUM_IP4CSUM_EN, ip4csum_tx);
-	AQ_WRITE_REG_BIT(sc, TPO_HWCSUM_REG, TPO_HWCSUM_L4CSUM_EN, l4csum_tx);
-
-	/* RX checksums offloads*/
-	AQ_WRITE_REG_BIT(sc, RPO_HWCSUM_REG, RPO_HWCSUM_IP4CSUM_EN, ip4csum_rx);
-	AQ_WRITE_REG_BIT(sc, RPO_HWCSUM_REG, RPO_HWCSUM_L4CSUM_EN, l4csum_rx);
-
-	/* LSO offloads*/
-	AQ_WRITE_REG(sc, TDM_LSO_EN_REG, lso);
-
-#define AQ_B0_LRO_RXD_MAX	16
-	v = (8 < AQ_B0_LRO_RXD_MAX) ? 3 :
-	    (4 < AQ_B0_LRO_RXD_MAX) ? 2 :
-	    (2 < AQ_B0_LRO_RXD_MAX) ? 1 : 0;
-	for (i = 0; i < AQ_RINGS_NUM; i++) {
-		AQ_WRITE_REG_BIT(sc, RPO_LRO_LDES_MAX_REG(i),
-		    RPO_LRO_LDES_MAX_MASK(i), v);
-	}
-
-	AQ_WRITE_REG_BIT(sc, RPO_LRO_TB_DIV_REG, RPO_LRO_TB_DIV, 0x61a);
-	AQ_WRITE_REG_BIT(sc, RPO_LRO_INACTIVE_IVAL_REG,
-	    RPO_LRO_INACTIVE_IVAL, 0);
-	/*
-	 * the LRO timebase divider is 5 uS (0x61a),
-	 * to get a maximum coalescing interval of 250 uS,
-	 * we need to multiply by 50(0x32) to get
-	 * the default value 250 uS
-	 */
-	AQ_WRITE_REG_BIT(sc, RPO_LRO_MAX_COALESCING_IVAL_REG,
-	    RPO_LRO_MAX_COALESCING_IVAL, 50);
-	AQ_WRITE_REG_BIT(sc, RPO_LRO_CONF_REG,
-	    RPO_LRO_CONF_QSESSION_LIMIT, 1);
-	AQ_WRITE_REG_BIT(sc, RPO_LRO_CONF_REG,
-	    RPO_LRO_CONF_TOTAL_DESC_LIMIT, 2);
-	AQ_WRITE_REG_BIT(sc, RPO_LRO_CONF_REG,
-	    RPO_LRO_CONF_PATCHOPTIMIZATION_EN, 0);
-	AQ_WRITE_REG_BIT(sc, RPO_LRO_CONF_REG,
-	    RPO_LRO_CONF_MIN_PAYLOAD_OF_FIRST_PKT, 10);
-	AQ_WRITE_REG(sc, RPO_LRO_RSC_MAX_REG, 1);
-	AQ_WRITE_REG(sc, RPO_LRO_ENABLE_REG, lro);
-
-	return 0;
-}
-
-static int
-aq_set_filter(struct aq_softc *sc)
-{
-	struct ifnet * const ifp = &sc->sc_ethercom.ec_if;
-	struct ethercom * const ec = &sc->sc_ethercom;
-	struct ether_multi *enm;
-	struct ether_multistep step;
-	int idx, error = 0;
-
-	if (HWTYPE_AQ2_P(sc)) {
-		uint32_t action = (ifp->if_flags & IFF_PROMISC) ?
-		    AQ2_ART_ACTION_DISABLE : AQ2_ART_ACTION_DROP;
-		aq2_filter_art_set(sc, AQ2_RPF_INDEX_L2_PROMISC_OFF, 0,
-		    AQ2_RPF_TAG_UC_MASK | AQ2_RPF_TAG_ALLMC_MASK, action);
-		aq2_filter_art_set(sc, AQ2_RPF_INDEX_VLAN_PROMISC_OFF, 0,
-		    AQ2_RPF_TAG_VLAN_MASK | AQ2_RPF_TAG_UNTAG_MASK, action);
-	}
-
-	if (ifp->if_flags & IFF_PROMISC) {
-		AQ_WRITE_REG_BIT(sc, RPF_L2BC_REG, RPF_L2BC_PROMISC,
-		    (ifp->if_flags & IFF_PROMISC) ? 1 : 0);
-		ec->ec_flags |= ETHER_F_ALLMULTI;
-		goto done;
-	}
-
-	/* clear all table */
-	for (idx = 0; idx < AQ_HW_MAC_NUM(sc); idx++) {
-		if (idx == AQ_HW_MAC_OWN)	/* already used for own */
-			continue;
-		aq_set_mac_addr(sc, idx, NULL);
-	}
-
-	/* don't accept all multicast */
-	AQ_WRITE_REG_BIT(sc, RPF_MCAST_FILTER_MASK_REG,
-	    RPF_MCAST_FILTER_MASK_ALLMULTI, 0);
-	AQ_WRITE_REG_BIT(sc, RPF_MCAST_FILTER_REG(0),
-	    RPF_MCAST_FILTER_EN, 0);
-
-	idx = 0;
-	ETHER_LOCK(ec);
-	ETHER_FIRST_MULTI(step, ec, enm);
-	while (enm != NULL) {
-		if (idx == AQ_HW_MAC_OWN)
-			idx++;
-
-		if ((idx >= AQ_HW_MAC_NUM(sc)) ||
-		    memcmp(enm->enm_addrlo, enm->enm_addrhi, ETHER_ADDR_LEN)) {
-			/*
-			 * too many filters.
-			 * fallback to accept all multicast addresses.
-			 */
-			AQ_WRITE_REG_BIT(sc, RPF_MCAST_FILTER_MASK_REG,
-			    RPF_MCAST_FILTER_MASK_ALLMULTI, 1);
-			AQ_WRITE_REG_BIT(sc, RPF_MCAST_FILTER_REG(0),
-			    RPF_MCAST_FILTER_EN, 1);
-			ec->ec_flags |= ETHER_F_ALLMULTI;
-			ETHER_UNLOCK(ec);
-			goto done;
-		}
-
-		/* add a filter */
-		aq_set_mac_addr(sc, idx++, enm->enm_addrlo);
-
-		ETHER_NEXT_MULTI(step, enm);
-	}
-	ec->ec_flags &= ~ETHER_F_ALLMULTI;
-	ETHER_UNLOCK(ec);
-
- done:
-	return error;
-}
-
-static int
-aq2_filter_art_set(struct aq_softc *sc, uint32_t idx,
-    uint32_t tag, uint32_t mask, uint32_t action)
-{
+	struct aq_fw2x_capabilities caps = { 0 };
 	int error;
+
+	error = aq1_fw_downld_dwords(sc,
+	    sc->sc_mbox_addr + offsetof(struct aq_fw2x_mailbox, caps),
+	    (uint32_t *)&caps, sizeof caps / sizeof(uint32_t));
+	if (error != 0) {
+		printf("%s: fw2x> can't get F/W capabilities mask, error %d\n",
+		    DEVNAME(sc), error);
+		return error;
+	}
+	sc->sc_fw_caps = caps.caps_lo | ((uint64_t)caps.caps_hi << 32);
+
+	DPRINTF(("%s: fw2x> F/W capabilities=0x%llx\n", DEVNAME(sc),
+	    sc->sc_fw_caps));
+
+	return 0;
+}
+
+int
+aq_fw1x_reset(struct aq_softc *sc)
+{
+	printf("%s: unimplemented %s\n", DEVNAME(sc), __func__);
+	return 0;
+}
+
+int
+aq_fw1x_set_mode(struct aq_softc *sc, enum aq_hw_fw_mpi_state w,
+    enum aq_link_speed x, enum aq_link_fc y, enum aq_link_eee z)
+{
+	return 0;
+}
+
+int
+aq_fw1x_get_mode(struct aq_softc *sc, enum aq_hw_fw_mpi_state *w,
+    enum aq_link_speed *x, enum aq_link_fc *y, enum aq_link_eee *z)
+{
+	return 0;
+}
+
+int
+aq_fw1x_get_stats(struct aq_softc *sc, struct aq_hw_stats_s *w)
+{
+	return 0;
+}
+
+
+int
+aq_fw2x_get_mode(struct aq_softc *sc, enum aq_hw_fw_mpi_state *modep,
+    enum aq_link_speed *speedp, enum aq_link_fc *fcp, enum aq_link_eee *eeep)
+{
+	uint64_t mpi_state, mpi_ctrl;
+	enum aq_link_speed speed;
+	enum aq_link_fc fc;
 
 	AQ_MPI_LOCK(sc);
 
-	WAIT_FOR(AQ_READ_REG(sc, AQ2_ART_SEM_REG) == 1, 10, 10000, &error);
-	if (error != 0) {
-		device_printf(sc->sc_dev, "%s: timeout\n", __func__);
-		goto done;
+	mpi_state = AQ_READ64_REG(sc, FW2X_MPI_STATE_REG);
+	if (modep != NULL) {
+		mpi_ctrl = AQ_READ64_REG(sc, FW2X_MPI_CONTROL_REG);
+		if (mpi_ctrl & FW2X_CTRL_RATE_MASK)
+			*modep = MPI_INIT;
+		else
+			*modep = MPI_DEINIT;
 	}
 
-	idx += sc->sc_filter_art_base_index;
-	AQ_WRITE_REG(sc, AQ2_RPF_ACT_ART_REQ_TAG_REG(idx), tag);
-	AQ_WRITE_REG(sc, AQ2_RPF_ACT_ART_REQ_MASK_REG(idx), mask);
-	AQ_WRITE_REG(sc, AQ2_RPF_ACT_ART_REQ_ACTION_REG(idx), action);
-
-	AQ_WRITE_REG(sc, AQ2_ART_SEM_REG, 1);
-
- done:
 	AQ_MPI_UNLOCK(sc);
+
+	if (mpi_state & FW2X_CTRL_RATE_10G)
+		speed = AQ_LINK_10G;
+	else if (mpi_state & FW2X_CTRL_RATE_5G)
+		speed = AQ_LINK_5G;
+	else if (mpi_state & FW2X_CTRL_RATE_2G5)
+		speed = AQ_LINK_2G5;
+	else if (mpi_state & FW2X_CTRL_RATE_1G)
+		speed = AQ_LINK_1G;
+	else if (mpi_state & FW2X_CTRL_RATE_100M)
+		speed = AQ_LINK_100M;
+	else
+		speed = AQ_LINK_NONE;
+	if (speedp != NULL)
+		*speedp = speed;
+
+	fc = AQ_FC_NONE;
+	if (mpi_state & FW2X_CTRL_PAUSE)
+		fc |= AQ_FC_RX;
+	if (mpi_state & FW2X_CTRL_ASYMMETRIC_PAUSE)
+		fc |= AQ_FC_TX;
+	if (fcp != NULL)
+		*fcp = fc;
+
+	if (eeep != NULL)
+		*eeep = AQ_EEE_DISABLE;
+
 	return 0;
 }
 
-static int
-aq2_init_filter(struct aq_softc *sc)
+int
+aq_fw2x_get_stats(struct aq_softc *sc, struct aq_hw_stats_s *w)
 {
-	AQ_WRITE_REG_BIT(sc, AQ2_RPF_REC_TAB_ENABLE_REG,
-	    AQ2_RPF_REC_TAB_ENABLE_MASK, 0xffff);
-	AQ_WRITE_REG_BIT(sc, RPF_L2UC_MSW_REG(0),
-	    RPF_L2UC_MSW_TAG, __SHIFTIN(1, AQ2_RPF_TAG_UC_MASK));
-	AQ_WRITE_REG_BIT(sc, AQ2_RPF_L2BC_TAG_REG,
-	    AQ2_RPF_L2BC_TAG_MASK, __SHIFTIN(1, AQ2_RPF_TAG_UC_MASK));
-
-	aq2_filter_art_set(sc, AQ2_RPF_INDEX_L2_PROMISC_OFF,
-	    0, AQ2_RPF_TAG_UC_MASK | AQ2_RPF_TAG_ALLMC_MASK,
-	    AQ2_ART_ACTION_DROP);
-	aq2_filter_art_set(sc, AQ2_RPF_INDEX_VLAN_PROMISC_OFF,
-	    0, AQ2_RPF_TAG_VLAN_MASK | AQ2_RPF_TAG_UNTAG_MASK,
-	    AQ2_ART_ACTION_DROP);
-
-	for (int i = 0; i < 8; i++) {
-		aq2_filter_art_set(sc, AQ2_RPF_INDEX_PCP_TO_TC + i,
-		    __SHIFTIN(i, AQ2_RPF_TAG_PCP_MASK), AQ2_RPF_TAG_PCP_MASK,
-		    AQ2_ART_ACTION_ASSIGN_TC(i % sc->sc_nqueues));
-	}
-
-	return 0;
-}
-
-static int
-aq2_interface_buffer_read(struct aq_softc *sc, uint32_t reg0, uint32_t *data0,
-    uint32_t size0)
-{
-	uint32_t tid0, tid1, reg, *data, size;
-	int timo;
-
-	for (timo = 10000; timo > 0; timo--) {
-		tid0 = AQ_READ_REG(sc, AQ2_FW_INTERFACE_OUT_TRANSACTION_ID_REG);
-		if (__SHIFTOUT(tid0, AQ2_FW_INTERFACE_OUT_TRANSACTION_ID_A) !=
-		    __SHIFTOUT(tid0, AQ2_FW_INTERFACE_OUT_TRANSACTION_ID_B)) {
-			delay(10);
-			continue;
-		}
-
-		for (reg = reg0, data = data0, size = size0;
-		    size >= 4; reg += 4, data++, size -= 4) {
-			*data = AQ_READ_REG(sc, reg);
-		}
-
-		tid1 = AQ_READ_REG(sc, AQ2_FW_INTERFACE_OUT_TRANSACTION_ID_REG);
-		if (tid0 == tid1)
-			break;
-	}
-	if (timo == 0) {
-		device_printf(sc->sc_dev, "%s: timeout\n", __func__);
-		return ETIMEDOUT;
-	}
-	return 0;
-}
-
-static int
-aq2_fw_reboot(struct aq_softc *sc)
-{
-	uint32_t v;
-	int timo;
-	char buf[32];
-
-	/* It seems that there is still only one type of firmware ABI in aq2 */
-	sc->sc_fw_ops = &aq2_fw_ops;
-	sc->sc_features |= FEATURES_AQ2;
-	sc->sc_max_mtu = AQ2_JUMBO_MTU;
-
-	AQ_WRITE_REG(sc, AQ2_MCP_HOST_REQ_INT_CLR_REG, 1);
-	AQ_WRITE_REG(sc, AQ2_MIF_BOOT_REG, 1);	/* reboot request */
-	for (timo = 200000; timo > 0; timo--) {
-		v = AQ_READ_REG(sc, AQ2_MIF_BOOT_REG);
-		if ((v & AQ2_MIF_BOOT_BOOT_STARTED) && v != 0xffffffff)
-			break;
-		delay(10);
-	}
-	if (timo <= 0) {
-		aprint_error_dev(sc->sc_dev, "FW reboot timeout\n");
-		return ETIMEDOUT;
-	}
-
-	for (timo = 2000000; timo > 0; timo--) {
-		v = AQ_READ_REG(sc, AQ2_MIF_BOOT_REG);
-		if ((v & AQ2_MIF_BOOT_FW_INIT_FAILED) ||
-		    (v & AQ2_MIF_BOOT_FW_INIT_COMP_SUCCESS))
-			break;
-		v = AQ_READ_REG(sc, AQ2_MCP_HOST_REQ_INT_REG);
-		if (v & AQ2_MCP_HOST_REQ_INT_READY)
-			break;
-		delay(10);
-	}
-	if (timo <= 0) {
-		aprint_error_dev(sc->sc_dev, "FW restart timeout\n");
-		return ETIMEDOUT;
-	}
-
-	v = AQ_READ_REG(sc, AQ2_MIF_BOOT_REG);
-	if (v & AQ2_MIF_BOOT_FW_INIT_FAILED) {
-		aprint_error_dev(sc->sc_dev, "FW restart failed\n");
-		return ETIMEDOUT;
-	}
-
-	v = AQ_READ_REG(sc, AQ2_MCP_HOST_REQ_INT_REG);
-	if (v & AQ2_MCP_HOST_REQ_INT_READY) {
-		aprint_error_dev(sc->sc_dev, "firmware required\n");
-		return ENXIO;
-	}
-
-	/*
-	 * Get aq2 firmware version.
-	 * Note that the bit layout and its meaning are different from aq1.
-	 */
-	aq2_interface_buffer_read(sc, AQ2_FW_INTERFACE_OUT_VERSION_BUNDLE_REG,
-	    (uint32_t *)&v, sizeof(v));
-	sc->sc_fw_version =
-	    __SHIFTOUT(v, AQ2_FW_INTERFACE_OUT_VERSION_MAJOR) << 24 |
-	    __SHIFTOUT(v, AQ2_FW_INTERFACE_OUT_VERSION_MINOR) << 16 |
-	    __SHIFTOUT(v, AQ2_FW_INTERFACE_OUT_VERSION_BUILD);
-
-	aq2_interface_buffer_read(sc, AQ2_FW_INTERFACE_OUT_VERSION_IFACE_REG,
-	    (uint32_t *)&v, sizeof(v));
-	switch (__SHIFTOUT(v, AQ2_FW_INTERFACE_OUT_VERSION_IFACE_VER)) {
-	case AQ2_FW_INTERFACE_OUT_VERSION_IFACE_VER_A0:
-		sc->sc_features |= FEATURES_AQ2_IFACE_A0;
-		strncpy(buf, "A0", sizeof(buf));
-		break;
-	case AQ2_FW_INTERFACE_OUT_VERSION_IFACE_VER_B0:
-		sc->sc_features |= FEATURES_AQ2_IFACE_B0;
-		strncpy(buf, "B0", sizeof(buf));
-		break;
-	default:
-		snprintf(buf, sizeof(buf), "(unknown 0x%08x)", v);
-		break;
-	}
-	aprint_normal_dev(sc->sc_dev,
-	    "Atlantic2 %s, F/W version %d.%d.%d\n", buf,
-	    FW_VERSION_MAJOR(sc), FW_VERSION_MINOR(sc), FW_VERSION_BUILD(sc));
-
-	aq2_interface_buffer_read(sc, AQ2_FW_INTERFACE_OUT_FILTER_CAPS_REG,
-	    (uint32_t *)&sc->sc_filter_caps, sizeof(sc->sc_filter_caps));
-	sc->sc_filter_art_base_index = __SHIFTOUT(sc->sc_filter_caps.caps3,
-	    AQ2_FW_INTERFACE_OUT_FILTER_CAPS3_RESOLVER_BASE_INDEX) * 8;
-
-	/* debug info */
-	v = AQ_READ_REG(sc, AQ_HW_REVISION_REG);
-	aprint_debug_dev(sc->sc_dev, "HW Rev: 0x%08x\n", v);
-
-	aq2_interface_buffer_read(sc, AQ2_FW_INTERFACE_OUT_VERSION_MAC_REG,
-	    (uint32_t *)&v, sizeof(v));
-	aprint_debug_dev(sc->sc_dev, "MAC Version %d.%d.%d\n",
-	    (int)__SHIFTOUT(v, AQ2_FW_INTERFACE_OUT_VERSION_MAJOR),
-	    (int)__SHIFTOUT(v, AQ2_FW_INTERFACE_OUT_VERSION_MINOR),
-	    (int)__SHIFTOUT(v, AQ2_FW_INTERFACE_OUT_VERSION_BUILD));
-
-	aq2_interface_buffer_read(sc, AQ2_FW_INTERFACE_OUT_VERSION_PHY_REG,
-	    (uint32_t *)&v, sizeof(v));
-	aprint_debug_dev(sc->sc_dev, "PHY Version %d.%d.%d\n",
-	    (int)__SHIFTOUT(v, AQ2_FW_INTERFACE_OUT_VERSION_MAJOR),
-	    (int)__SHIFTOUT(v, AQ2_FW_INTERFACE_OUT_VERSION_MINOR),
-	    (int)__SHIFTOUT(v, AQ2_FW_INTERFACE_OUT_VERSION_BUILD));
-
-	v = AQ_READ_REG(sc, AQ2_HW_FPGA_VERSION_REG);
-	aprint_debug_dev(sc->sc_dev, "AQ2 FPGA Version: %d.%d.%d.%d\n",
-	    (int)__SHIFTOUT(v, __BITS(31, 24)),
-	    (int)__SHIFTOUT(v, __BITS(23, 16)),
-	    (int)__SHIFTOUT(v, __BITS(15, 8)),
-	    (int)__SHIFTOUT(v, __BITS(7, 0)));
-
-	aprint_debug_dev(sc->sc_dev, "FILTER CAPS: 0x%08x,0x%08x,0x%08x\n",
-	    sc->sc_filter_caps.caps1, sc->sc_filter_caps.caps2,
-	    sc->sc_filter_caps.caps3);
-
 	return 0;
 }
 
@@ -3510,17 +2225,20 @@ aq2_fw_wait_shared_ack(struct aq_softc *sc)
 	return error;
 }
 
-static int
+int
 aq2_fw_reset(struct aq_softc *sc)
 {
+	uint32_t v;
+	int error;
+
 	AQ_WRITE_REG_BIT(sc, AQ2_FW_INTERFACE_IN_LINK_CONTROL_REG,
 	    AQ2_FW_INTERFACE_IN_LINK_CONTROL_MODE,
 	    AQ2_FW_INTERFACE_IN_LINK_CONTROL_MODE_ACTIVE);
 
 	AQ_WRITE_REG(sc, AQ2_FW_INTERFACE_IN_MTU_REG,
-	    AQ2_JUMBO_MTU + sizeof(struct ether_header));
+	    /*AQ2_JUMBO_MTU*/ MCLBYTES + sizeof(struct ether_header));
 
-	uint32_t v = AQ_READ_REG(sc, AQ2_FW_INTERFACE_IN_REQUEST_POLICY_REG);
+	v = AQ_READ_REG(sc, AQ2_FW_INTERFACE_IN_REQUEST_POLICY_REG);
 	v |= AQ2_FW_INTERFACE_IN_REQUEST_POLICY_MCAST_QUEUE_OR_TC;
 	v &= ~AQ2_FW_INTERFACE_IN_REQUEST_POLICY_MCAST_RX_QUEUE_TC_INDEX;
 	v |= AQ2_FW_INTERFACE_IN_REQUEST_POLICY_MCAST_ACCEPT;
@@ -3531,14 +2249,47 @@ aq2_fw_reset(struct aq_softc *sc)
 	v &= ~AQ2_FW_INTERFACE_IN_REQUEST_POLICY_PROMISC_RX_QUEUE_TX_INDEX;
 	AQ_WRITE_REG(sc, AQ2_FW_INTERFACE_IN_REQUEST_POLICY_REG, v);
 
-	return aq2_fw_wait_shared_ack(sc);
+	error = aq2_fw_wait_shared_ack(sc);
+	if (error != 0)
+		printf(": reset timed out\n");
+	return error;
 }
 
-static int
-aq2_fw_set_mode(struct aq_softc *sc, aq_hw_fw_mpi_state_t mode,
-    aq_link_speed_t speed, aq_link_fc_t fc, aq_link_eee_t eee)
+int
+aq2_get_mac_addr(struct aq_softc *sc)
 {
-	uint32_t v;
+	uint32_t mac_addr[2];
+
+	memset(mac_addr, 0, sizeof(mac_addr));
+	AQ_READ_REGS(sc, AQ2_FW_INTERFACE_IN_MAC_ADDRESS_REG,
+	    mac_addr, nitems(mac_addr));
+
+#ifdef __HAVE_FDT
+	if (mac_addr[0] == 0 && mac_addr[1] == 0 &&
+	    PCITAG_NODE(sc->sc_pcitag)) {
+		OF_getprop(PCITAG_NODE(sc->sc_pcitag), "local-mac-address",
+		    mac_addr, ETHER_ADDR_LEN);
+	}
+#endif
+
+	if (mac_addr[0] == 0 && mac_addr[1] == 0) {
+		printf(": mac address not found\n");
+		return ENXIO;
+	}
+
+	mac_addr[0] = htole32(mac_addr[0]);
+	mac_addr[1] = htole32(mac_addr[1]);
+
+	memcpy(sc->sc_enaddr.ether_addr_octet,
+	    (uint8_t *)mac_addr, ETHER_ADDR_LEN);
+	return 0;
+}
+
+int
+aq2_fw_set_mode(struct aq_softc *sc, enum aq_hw_fw_mpi_state w,
+    enum aq_link_speed speed, enum aq_link_fc fc, enum aq_link_eee eee)
+{
+	uint32_t v, ov;
 	int error;
 
 	AQ_MPI_LOCK(sc);
@@ -3558,6 +2309,7 @@ aq2_fw_set_mode(struct aq_softc *sc, aq_hw_fw_mpi_state_t mode,
 	    AQ2_FW_INTERFACE_IN_LINK_OPTIONS_RATE_10M_HD);
 
 	v &= ~AQ2_FW_INTERFACE_IN_LINK_OPTIONS_LINK_UP;
+	ov = v;
 
 	if (speed & AQ_LINK_10G)
 		v |= AQ2_FW_INTERFACE_IN_LINK_OPTIONS_RATE_10G;
@@ -3604,15 +2356,21 @@ aq2_fw_set_mode(struct aq_softc *sc, aq_hw_fw_mpi_state_t mode,
 	return error;
 }
 
-static int
-aq2_fw_get_mode(struct aq_softc *sc, aq_hw_fw_mpi_state_t *modep,
-    aq_link_speed_t *speedp, aq_link_fc_t *fcp, aq_link_eee_t *eeep)
+int
+aq2_fw_get_mode(struct aq_softc *sc, enum aq_hw_fw_mpi_state *modep,
+    enum aq_link_speed *speedp, enum aq_link_fc *fcp, enum aq_link_eee *eeep)
 {
-	aq_link_speed_t speed;
 	uint32_t v;
+	enum aq_link_speed speed;
+	enum aq_link_fc fc = 0;
+	enum aq_link_eee eee;
+
+	if (modep != NULL)
+		*modep = MPI_INIT;
 
 	v = AQ_READ_REG(sc, AQ2_FW_INTERFACE_OUT_LINK_STATUS_REG);
-	switch (__SHIFTOUT(v, AQ2_FW_INTERFACE_OUT_LINK_STATUS_RATE)) {
+	switch ((v & AQ2_FW_INTERFACE_OUT_LINK_STATUS_RATE) >>
+	    AQ2_FW_INTERFACE_OUT_LINK_STATUS_RATE_S) {
 	case AQ2_FW_INTERFACE_OUT_LINK_STATUS_RATE_10G:
 		speed = AQ_LINK_10G;
 		break;
@@ -3639,7 +2397,6 @@ aq2_fw_get_mode(struct aq_softc *sc, aq_hw_fw_mpi_state_t *modep,
 	if (speedp != NULL)
 		*speedp = speed;
 
-	aq_link_fc_t fc = 0;
 	if (v & AQ2_FW_INTERFACE_OUT_LINK_STATUS_PAUSE_TX)
 		fc |= AQ_FC_TX;
 	if (v & AQ2_FW_INTERFACE_OUT_LINK_STATUS_PAUSE_RX)
@@ -3647,131 +2404,1281 @@ aq2_fw_get_mode(struct aq_softc *sc, aq_hw_fw_mpi_state_t *modep,
 	if (fcp != NULL)
 		*fcp = fc;
 
-	aq_link_eee_t eee;
 	eee = (v & AQ2_FW_INTERFACE_OUT_LINK_STATUS_EEE) ?
 	    AQ_EEE_ENABLE : AQ_EEE_DISABLE;
 	if (eeep != NULL)
 		*eeep = eee;
 
-	return -1;
+	return 0;
 }
 
-static int
-aq2_fw_get_stats(struct aq_softc *sc, aq_hw_stats_s_t *stats)
+int
+aq2_fw_get_stats(struct aq_softc *sc, struct aq_hw_stats_s *w)
 {
-	aq2_statistics_t aq2stat;
-	int error;
-
-	AQ_MPI_LOCK(sc);
-	error = aq2_interface_buffer_read(sc, AQ2_FW_INTERFACE_OUT_STATS_REG,
-	    (uint32_t *)&aq2stat, sizeof(aq2stat));
-	AQ_MPI_UNLOCK(sc);
-	if (error != 0)
-		return error;
-
-	if (sc->sc_features & FEATURES_AQ2_IFACE_A0) {
-		/* RX */
-		stats->uprc = aq2stat.a0.rx_unicast_frames;
-		stats->mprc = aq2stat.a0.rx_multicast_frames;
-		stats->bprc = aq2stat.a0.rx_broadcast_frames;
-		stats->erpr = aq2stat.a0.rx_errors;
-		stats->ubrc = aq2stat.a0.rx_unicast_octets;
-		stats->bbrc = aq2stat.a0.rx_broadcast_octets;
-		stats->mbrc = aq2stat.a0.rx_multicast_octets;
-		stats->prc = aq2stat.a0.rx_good_frames;
-		/* TX */
-		stats->uptc = aq2stat.a0.tx_unicast_frames;
-		stats->bptc = aq2stat.a0.tx_broadcast_frames;
-		stats->mptc = aq2stat.a0.tx_multicast_frames;
-		stats->erpt = aq2stat.a0.tx_errors;
-		stats->ubtc = aq2stat.a0.tx_unicast_octets;
-		stats->bbtc = aq2stat.a0.tx_broadcast_octets;
-		stats->mbtc = aq2stat.a0.tx_multicast_octets;
-		stats->ptc = aq2stat.a0.tx_good_frames;
-	} else if (sc->sc_features & FEATURES_AQ2_IFACE_B0) {
-		/* RX */
-		stats->uprc = aq2stat.b0.rx_unicast_frames;
-		stats->mprc = aq2stat.b0.rx_multicast_frames;
-		stats->bprc = aq2stat.b0.rx_broadcast_frames;
-		stats->erpr = aq2stat.b0.rx_errors;
-		stats->ubrc = 0;
-		stats->bbrc = 0;
-		stats->mbrc = 0;
-		stats->prc = aq2stat.b0.rx_good_frames;
-		/* TX */
-		stats->uptc = aq2stat.b0.tx_unicast_frames;
-		stats->bptc = aq2stat.b0.tx_multicast_frames;
-		stats->mptc = aq2stat.b0.tx_broadcast_frames;
-		stats->erpt = aq2stat.b0.tx_errors;
-		stats->ubtc = 0;
-		stats->bbtc = 0;
-		stats->mbtc = 0;
-		stats->ptc = aq2stat.b0.tx_good_frames;
-	} else {
-		return ENOTSUP;
-	}
-	stats->dpc = AQ_READ64_REG(sc, RX_DMA_DROP_PKT_CNT_REG);
-	stats->cprc = AQ_READ64_REG(sc, RX_DMA_COALESCED_PKT_CNT_REG);
-
-	return error;
+	return 0;
 }
 
-// #if NSYSMON_ENVSYS > 0
-// static int
-// aq2_fw_get_temperature(struct aq_softc *sc, uint32_t *temp)
-// {
-// 	aq2_health_monitor_t health;
-// 	uint32_t data;
-
-// 	AQ_MPI_LOCK(sc);
-
-// 	aq2_interface_buffer_read(sc, AQ2_FW_INTERFACE_OUT_PHY_HEALTH_MONITOR,
-// 	    (uint32_t *)&health, sizeof(health));
-
-// 	AQ_MPI_UNLOCK(sc);
-
-// 	data = __SHIFTOUT(health.data1, HEALTH_MONITOR_DATA1_TEMPERATURE);
-// 	if (data == 0)
-// 		return EIO;
-
-// 	*temp = data * 1000000 + 273150000;
-// 	return 0;
-// }
-// #endif
-
-static int
-aq2_get_mac_addr(struct aq_softc *sc)
+void
+aq_hw_l3_filter_set(struct aq_softc *sc)
 {
-	uint32_t mac_addr[2];
+	int i;
 
-	memset(mac_addr, 0, sizeof(mac_addr));
-	AQ_READ_REGS(sc, AQ2_FW_INTERFACE_IN_MAC_ADDRESS_REG,
-	    mac_addr, __arraycount(mac_addr));
+	/* clear all filter */
+	for (i = 0; i < 8; i++) {
+		AQ_WRITE_REG_BIT(sc, RPF_L3_FILTER_REG(i),
+		    RPF_L3_FILTER_L4_EN, 0);
+	}
+}
 
-	if (mac_addr[0] == 0 && mac_addr[1] == 0) {
-		aprint_error_dev(sc->sc_dev, "mac address not found\n");
-		return ENXIO;
+int
+aq_hw_init(struct aq_softc *sc, int irqmode, int multivec)
+{
+	uint32_t v;
+
+	if (HWTYPE_AQ1_P(sc)) {
+		/* Force limit MRRS on RDM/TDM to 2K */
+		v = AQ_READ_REG(sc, AQ_PCI_REG_CONTROL_6_REG);
+		AQ_WRITE_REG(sc, AQ_PCI_REG_CONTROL_6_REG,
+		    (v & ~0x0707) | 0x0404);
+
+		/*
+		 * TX DMA total request limit. B0 hardware is not capable to
+		 * handle more than (8K-MRRS) incoming DMA data.
+		 * Value 24 in 256byte units
+		 */
+		AQ_WRITE_REG(sc, AQ_HW_TX_DMA_TOTAL_REQ_LIMIT_REG, 24);
 	}
 
-	HTOLE32(mac_addr[0]);
-	HTOLE32(mac_addr[1]);
+	if (HWTYPE_AQ2_P(sc)) {
+		uint32_t fpgaver, speed;
+		fpgaver = AQ_READ_REG(sc, AQ2_HW_FPGA_VERSION_REG);
+		if (fpgaver < 0x01000000)
+			speed = AQ2_LAUNCHTIME_CTRL_RATIO_SPEED_FULL;
+		else if (fpgaver >= 0x01008502)
+			speed = AQ2_LAUNCHTIME_CTRL_RATIO_SPEED_HALF;
+		else
+			speed = AQ2_LAUNCHTIME_CTRL_RATIO_SPEED_QUARTER;
+		AQ_WRITE_REG_BIT(sc, AQ2_LAUNCHTIME_CTRL_REG,
+		    AQ2_LAUNCHTIME_CTRL_RATIO, speed);
+	}
 
-	memcpy(sc->sc_enaddr.ether_addr_octet,
-	    (uint8_t *)mac_addr, ETHER_ADDR_LEN);
-	aprint_normal_dev(sc->sc_dev, "Etheraddr: %s\n",
-	    ether_sprintf(sc->sc_enaddr.ether_addr_octet));
+	aq_hw_init_tx_path(sc);
+	aq_hw_init_rx_path(sc);
+
+	if (aq_set_mac_addr(sc, AQ_HW_MAC_OWN, sc->sc_enaddr.ether_addr_octet))
+		return EINVAL;
+
+	aq_set_linkmode(sc, AQ_LINK_NONE, AQ_FC_NONE, AQ_EEE_DISABLE);
+
+	aq_hw_qos_set(sc);
+
+	if (HWTYPE_AQ2_P(sc)) {
+		AQ_WRITE_REG_BIT(sc, AQ2_RPF_NEW_CTRL_REG,
+		    AQ2_RPF_NEW_CTRL_ENABLE, 1);
+	}
+
+	/* Enable interrupt */
+	AQ_WRITE_REG(sc, AQ_INTR_CTRL_REG, AQ_INTR_CTRL_RESET_DIS);
+	AQ_WRITE_REG_BIT(sc, AQ_INTR_CTRL_REG, AQ_INTR_CTRL_MULTIVEC, multivec);
+
+	AQ_WRITE_REG_BIT(sc, AQ_INTR_CTRL_REG, AQ_INTR_CTRL_IRQMODE, irqmode);
+
+	AQ_WRITE_REG(sc, AQ_INTR_AUTOMASK_REG, 0xffffffff);
+
+	AQ_WRITE_REG(sc, AQ_GEN_INTR_MAP_REG(0),
+	    ((AQ_B0_ERR_INT << 24) | (1U << 31)) |
+	    ((AQ_B0_ERR_INT << 16) | (1 << 23))
+	);
+
+	/* link interrupt */
+	AQ_WRITE_REG(sc, AQ_GEN_INTR_MAP_REG(3),
+	    (1 << 7) | sc->sc_linkstat_irq);
 
 	return 0;
 }
 
-static int
-aq_ifmedia_change(struct ifnet * const ifp)
+void
+aq_hw_init_tx_path(struct aq_softc *sc)
 {
-	struct aq_softc * const sc = ifp->if_softc;
+	/* Tx TC/RSS number config */
+	AQ_WRITE_REG_BIT(sc, TPB_TX_BUF_REG, TPB_TX_BUF_TC_MODE_EN, 1);
 
-	aq_link_speed_t rate = AQ_LINK_NONE;
-	aq_link_fc_t fc = AQ_FC_NONE;
-	aq_link_eee_t eee = AQ_EEE_DISABLE;
+	AQ_WRITE_REG_BIT(sc, THM_LSO_TCP_FLAG1_REG,
+	    THM_LSO_TCP_FLAG1_FIRST, 0x0ff6);
+	AQ_WRITE_REG_BIT(sc, THM_LSO_TCP_FLAG1_REG,
+	    THM_LSO_TCP_FLAG1_MID,   0x0ff6);
+	AQ_WRITE_REG_BIT(sc, THM_LSO_TCP_FLAG2_REG,
+	   THM_LSO_TCP_FLAG2_LAST,  0x0f7f);
+
+	/* misc */
+	AQ_WRITE_REG(sc, TX_TPO2_REG,
+	   (sc->sc_features & FEATURES_TPO2) ? TX_TPO2_EN : 0);
+	AQ_WRITE_REG_BIT(sc, TDM_DCA_REG, TDM_DCA_EN, 0);
+	AQ_WRITE_REG_BIT(sc, TDM_DCA_REG, TDM_DCA_MODE, 0);
+
+	AQ_WRITE_REG_BIT(sc, TPB_TX_BUF_REG, TPB_TX_BUF_SCP_INS_EN, 1);
+
+	if ((sc->sc_features & FEATURES_AQ1_REV_B) || HWTYPE_AQ2_P(sc)) {
+		AQ_WRITE_REG_BIT(sc, TPB_TX_BUF_REG, TPB_TX_BUF_CLK_GATE_EN, 0);
+	}
+}
+
+void
+aq_hw_init_rx_path(struct aq_softc *sc)
+{
+	int i;
+
+	/* clear setting */
+	AQ_WRITE_REG_BIT(sc, RPB_RPF_RX_REG, RPB_RPF_RX_TC_MODE, 0);
+	AQ_WRITE_REG_BIT(sc, RPB_RPF_RX_REG, RPB_RPF_RX_FC_MODE, 0);
+
+	if (HWTYPE_AQ2_P(sc)) {
+		AQ_WRITE_REG_BIT(sc, AQ2_RPF_REDIR2_REG,
+		    AQ2_RPF_REDIR2_HASHTYPE, AQ2_RPF_REDIR2_HASHTYPE_ALL);
+	}
+
+	if (sc->sc_nqueues > 1) {
+		uint32_t bits;
+
+		AQ_WRITE_REG_BIT(sc, RPB_RPF_RX_REG, RPB_RPF_RX_TC_MODE, 1);
+		AQ_WRITE_REG_BIT(sc, RPB_RPF_RX_REG, RPB_RPF_RX_FC_MODE, 1);
+
+		switch (sc->sc_nqueues) {
+		case 2:
+			bits = 0x11111111;
+			break;
+		case 4:
+			bits = 0x22222222;	
+			break;
+		case 8:
+			bits = 0x33333333;
+			break;
+		}
+
+		AQ_WRITE_REG(sc, RX_FLR_RSS_CONTROL1_REG,
+		    RX_FLR_RSS_CONTROL1_EN | bits);
+	} else {
+		AQ_WRITE_REG(sc, RX_FLR_RSS_CONTROL1_REG, 0);
+	}
+
+	if (HWTYPE_AQ1_P(sc)) {
+		for (i = 0; i < 32; i++) {
+			AQ_WRITE_REG_BIT(sc, RPF_ETHERTYPE_FILTER_REG(i),
+			   RPF_ETHERTYPE_FILTER_EN, 0);
+		}
+	}
+
+	/* L2 and Multicast filters */
+	for (i = 0; i < AQ_HW_MAC_NUM; i++) {
+		AQ_WRITE_REG_BIT(sc, RPF_L2UC_MSW_REG(i), RPF_L2UC_MSW_EN, 0);
+		AQ_WRITE_REG_BIT(sc, RPF_L2UC_MSW_REG(i), RPF_L2UC_MSW_ACTION,
+		    RPF_ACTION_HOST);
+	}
+	AQ_WRITE_REG(sc, RPF_MCAST_FILTER_MASK_REG, 0);
+	AQ_WRITE_REG(sc, RPF_MCAST_FILTER_REG(0), 0x00010fff);
+
+	/* Vlan filters */
+	AQ_WRITE_REG_BIT(sc, RPF_VLAN_TPID_REG, RPF_VLAN_TPID_OUTER,
+	    ETHERTYPE_QINQ);
+	AQ_WRITE_REG_BIT(sc, RPF_VLAN_TPID_REG, RPF_VLAN_TPID_INNER,
+	    ETHERTYPE_VLAN);
+	AQ_WRITE_REG_BIT(sc, RPF_VLAN_MODE_REG, RPF_VLAN_MODE_PROMISC, 1);
+
+	if ((sc->sc_features & FEATURES_AQ1_REV_B) || HWTYPE_AQ2_P(sc)) {
+		AQ_WRITE_REG_BIT(sc, RPF_VLAN_MODE_REG,
+		    RPF_VLAN_MODE_ACCEPT_UNTAGGED, 1);
+		AQ_WRITE_REG_BIT(sc, RPF_VLAN_MODE_REG,
+		    RPF_VLAN_MODE_UNTAGGED_ACTION, RPF_ACTION_HOST);
+	}
+
+	if (HWTYPE_AQ2_P(sc)) {
+		AQ_WRITE_REG_BIT(sc, AQ2_RPF_REC_TAB_ENABLE_REG,
+		    AQ2_RPF_REC_TAB_ENABLE_MASK, 0xffff);
+		AQ_WRITE_REG_BIT(sc, RPF_L2UC_MSW_REG(0),
+		    RPF_L2UC_MSW_TAG, 1);
+		AQ_WRITE_REG_BIT(sc, AQ2_RPF_L2BC_TAG_REG,
+		    AQ2_RPF_L2BC_TAG_MASK, 1);
+
+		aq2_filter_art_set(sc, AQ2_RPF_INDEX_L2_PROMISC_OFF,
+		    0, AQ2_RPF_TAG_UC_MASK | AQ2_RPF_TAG_ALLMC_MASK,
+		    AQ2_ART_ACTION_DROP);
+		aq2_filter_art_set(sc, AQ2_RPF_INDEX_VLAN_PROMISC_OFF,
+		    0, AQ2_RPF_TAG_VLAN_MASK | AQ2_RPF_TAG_UNTAG_MASK,
+		    AQ2_ART_ACTION_DROP);
+
+		for (i = 0; i < 8; i++) {
+			aq2_filter_art_set(sc, AQ2_RPF_INDEX_PCP_TO_TC + i,
+			    (i << AQ2_RPF_TAG_PCP_SHIFT), AQ2_RPF_TAG_PCP_MASK,
+			    AQ2_ART_ACTION_ASSIGN_TC(i % sc->sc_nqueues));
+		}
+
+	} else if (HWTYPE_AQ1_P(sc)) {
+		if (sc->sc_features & FEATURES_RPF2)
+			AQ_WRITE_REG(sc, RX_TCP_RSS_HASH_REG,
+			    RX_TCP_RSS_HASH_RPF2);
+		else
+			AQ_WRITE_REG(sc, RX_TCP_RSS_HASH_REG, 0);
+
+		/* we might want to figure out what this magic number does */
+		AQ_WRITE_REG_BIT(sc, RX_TCP_RSS_HASH_REG,
+		    RX_TCP_RSS_HASH_TYPE, 0x001e);
+	}
+
+	AQ_WRITE_REG_BIT(sc, RPF_L2BC_REG, RPF_L2BC_EN, 1);
+	AQ_WRITE_REG_BIT(sc, RPF_L2BC_REG, RPF_L2BC_ACTION, RPF_ACTION_HOST);
+	AQ_WRITE_REG_BIT(sc, RPF_L2BC_REG, RPF_L2BC_THRESHOLD, 0xffff);
+
+	AQ_WRITE_REG_BIT(sc, RX_DMA_DCA_REG, RX_DMA_DCA_EN, 0);
+	AQ_WRITE_REG_BIT(sc, RX_DMA_DCA_REG, RX_DMA_DCA_MODE, 0);
+}
+
+/* set multicast filter. index 0 for own address */
+int
+aq_set_mac_addr(struct aq_softc *sc, int index, uint8_t *enaddr)
+{
+	uint32_t h, l;
+
+	if (index >= AQ_HW_MAC_NUM)
+		return EINVAL;
+
+	if (enaddr == NULL) {
+		/* disable */
+		AQ_WRITE_REG_BIT(sc,
+		    RPF_L2UC_MSW_REG(index), RPF_L2UC_MSW_EN, 0);
+		return 0;
+	}
+
+	h = (enaddr[0] <<  8) | (enaddr[1]);
+	l = ((uint32_t)enaddr[2] << 24) | (enaddr[3] << 16) |
+	    (enaddr[4] <<  8) | (enaddr[5]);
+
+	/* disable, set, and enable */
+	AQ_WRITE_REG_BIT(sc, RPF_L2UC_MSW_REG(index), RPF_L2UC_MSW_EN, 0);
+	AQ_WRITE_REG(sc, RPF_L2UC_LSW_REG(index), l);
+	AQ_WRITE_REG_BIT(sc, RPF_L2UC_MSW_REG(index),
+	    RPF_L2UC_MSW_MACADDR_HI, h);
+	AQ_WRITE_REG_BIT(sc, RPF_L2UC_MSW_REG(index),
+	    RPF_L2UC_MSW_ACTION, RPF_ACTION_HOST);
+	if (HWTYPE_AQ2_P(sc))
+		AQ_WRITE_REG_BIT(sc, RPF_L2UC_MSW_REG(index),
+		    RPF_L2UC_MSW_TAG, 1);
+	AQ_WRITE_REG_BIT(sc, RPF_L2UC_MSW_REG(index), RPF_L2UC_MSW_EN, 1);
+
+	return 0;
+}
+
+int
+aq_get_linkmode(struct aq_softc *sc, enum aq_link_speed *speed,
+    enum aq_link_fc *fc, enum aq_link_eee *eee)
+{
+	enum aq_hw_fw_mpi_state mode;
+	int error;
+
+	error = sc->sc_fw_ops->get_mode(sc, &mode, speed, fc, eee);
+	if (error != 0)
+		return error;
+	if (mode != MPI_INIT)
+		return ENXIO;
+
+	return 0;
+}
+
+int
+aq_set_linkmode(struct aq_softc *sc, enum aq_link_speed speed,
+    enum aq_link_fc fc, enum aq_link_eee eee)
+{
+	return sc->sc_fw_ops->set_mode(sc, MPI_INIT, speed, fc, eee);
+}
+
+int
+aq_fw2x_set_mode(struct aq_softc *sc, enum aq_hw_fw_mpi_state mode,
+    enum aq_link_speed speed, enum aq_link_fc fc, enum aq_link_eee eee)
+{
+	uint64_t mpi_ctrl;
+	int error = 0;
+
+	AQ_MPI_LOCK(sc);
+
+	mpi_ctrl = AQ_READ64_REG(sc, FW2X_MPI_CONTROL_REG);
+
+	switch (mode) {
+	case MPI_INIT:
+		mpi_ctrl &= ~FW2X_CTRL_RATE_MASK;
+		if (speed & AQ_LINK_10G)
+			mpi_ctrl |= FW2X_CTRL_RATE_10G;
+		if (speed & AQ_LINK_5G)
+			mpi_ctrl |= FW2X_CTRL_RATE_5G;
+		if (speed & AQ_LINK_2G5)
+			mpi_ctrl |= FW2X_CTRL_RATE_2G5;
+		if (speed & AQ_LINK_1G)
+			mpi_ctrl |= FW2X_CTRL_RATE_1G;
+		if (speed & AQ_LINK_100M)
+			mpi_ctrl |= FW2X_CTRL_RATE_100M;
+
+		mpi_ctrl &= ~FW2X_CTRL_LINK_DROP;
+
+		mpi_ctrl &= ~FW2X_CTRL_EEE_MASK;
+		if (eee == AQ_EEE_ENABLE)
+			mpi_ctrl |= FW2X_CTRL_EEE_MASK;
+
+		mpi_ctrl &= ~(FW2X_CTRL_PAUSE | FW2X_CTRL_ASYMMETRIC_PAUSE);
+		if (fc & AQ_FC_RX)
+			mpi_ctrl |= FW2X_CTRL_PAUSE;
+		if (fc & AQ_FC_TX)
+			mpi_ctrl |= FW2X_CTRL_ASYMMETRIC_PAUSE;
+		break;
+	case MPI_DEINIT:
+		mpi_ctrl &= ~(FW2X_CTRL_RATE_MASK | FW2X_CTRL_EEE_MASK);
+		mpi_ctrl &= ~(FW2X_CTRL_PAUSE | FW2X_CTRL_ASYMMETRIC_PAUSE);
+		break;
+	default:
+		printf("%s: fw2x> unknown MPI state %d\n", DEVNAME(sc), mode);
+		error =  EINVAL;
+		goto failure;
+	}
+	AQ_WRITE64_REG(sc, FW2X_MPI_CONTROL_REG, mpi_ctrl);
+
+ failure:
+	AQ_MPI_UNLOCK(sc);
+	return error;
+}
+
+void
+aq_hw_qos_set(struct aq_softc *sc)
+{
+	uint32_t tc = 0;
+	uint32_t buff_size;
+
+	/* TPS Descriptor rate init */
+	AQ_WRITE_REG_BIT(sc, TPS_DESC_RATE_REG, TPS_DESC_RATE_TA_RST, 0);
+	AQ_WRITE_REG_BIT(sc, TPS_DESC_RATE_REG, TPS_DESC_RATE_LIM, 0xa);
+
+	/* TPS VM init */
+	AQ_WRITE_REG_BIT(sc, TPS_DESC_VM_ARB_MODE_REG, TPS_DESC_VM_ARB_MODE, 0);
+
+	/* TPS TC credits init */
+	AQ_WRITE_REG_BIT(sc, TPS_DESC_TC_ARB_MODE_REG, TPS_DESC_TC_ARB_MODE, 0);
+	AQ_WRITE_REG_BIT(sc, TPS_DATA_TC_ARB_MODE_REG, TPS_DATA_TC_ARB_MODE, 0);
+
+	if (HWTYPE_AQ2_P(sc)) {
+		AQ_WRITE_REG_BIT(sc, TPS_DATA_TCT_REG(tc),
+		    TPS2_DATA_TCT_CREDIT_MAX, 0xfff0);
+		AQ_WRITE_REG_BIT(sc, TPS_DATA_TCT_REG(tc),
+		    TPS2_DATA_TCT_WEIGHT, 0x640);
+	} else {
+		AQ_WRITE_REG_BIT(sc, TPS_DATA_TCT_REG(tc),
+		    TPS_DATA_TCT_CREDIT_MAX, 0xfff);
+		AQ_WRITE_REG_BIT(sc, TPS_DATA_TCT_REG(tc),
+		    TPS_DATA_TCT_WEIGHT, 0x64);
+	}
+	AQ_WRITE_REG_BIT(sc, TPS_DESC_TCT_REG(tc),
+	    TPS_DESC_TCT_CREDIT_MAX, 0x50);
+	AQ_WRITE_REG_BIT(sc, TPS_DESC_TCT_REG(tc),
+	    TPS_DESC_TCT_WEIGHT, 0x1e);
+
+	/* Tx buf size */
+	tc = 0;
+	buff_size = HWTYPE_AQ2_P(sc) ? AQ2_HW_TXBUF_MAX : AQ_HW_TXBUF_MAX;
+	AQ_WRITE_REG_BIT(sc, TPB_TXB_BUFSIZE_REG(tc), TPB_TXB_BUFSIZE,
+	    buff_size);
+	AQ_WRITE_REG_BIT(sc, TPB_TXB_THRESH_REG(tc), TPB_TXB_THRESH_HI,
+	    (buff_size * (1024 / 32) * 66) / 100);
+	AQ_WRITE_REG_BIT(sc, TPB_TXB_THRESH_REG(tc), TPB_TXB_THRESH_LO,
+	    (buff_size * (1024 / 32) * 50) / 100);
+
+	/* QoS Rx buf size per TC */
+	tc = 0;
+	buff_size = HWTYPE_AQ2_P(sc) ? AQ2_HW_RXBUF_MAX : AQ_HW_RXBUF_MAX;
+	AQ_WRITE_REG_BIT(sc, RPB_RXB_BUFSIZE_REG(tc), RPB_RXB_BUFSIZE,
+	    buff_size);
+	AQ_WRITE_REG_BIT(sc, RPB_RXB_XOFF_REG(tc), RPB_RXB_XOFF_EN, 0);
+	AQ_WRITE_REG_BIT(sc, RPB_RXB_XOFF_REG(tc), RPB_RXB_XOFF_THRESH_HI,
+	    (buff_size * (1024 / 32) * 66) / 100);
+	AQ_WRITE_REG_BIT(sc, RPB_RXB_XOFF_REG(tc), RPB_RXB_XOFF_THRESH_LO,
+	    (buff_size * (1024 / 32) * 50) / 100);
+
+	/* QoS 802.1p priority -> TC mapping */
+	int i_priority;
+	for (i_priority = 0; i_priority < 8; i_priority++) {
+		AQ_WRITE_REG_BIT(sc, RPF_RPB_RX_TC_UPT_REG,
+		    RPF_RPB_RX_TC_UPT_MASK(i_priority), 0);
+	}
+}
+
+int
+aq_init_rss(struct aq_softc *sc)
+{
+	uint32_t rss_key[AQ_RSS_KEYSIZE / sizeof(uint32_t)];
+	uint32_t redir;
+	int bits, queue;
+	int error;
+	int i;
+	
+	if (sc->sc_nqueues == 1)
+		return 0;
+
+	/* rss key is composed of 32 bit registers */
+	stoeplitz_to_key(rss_key, sizeof(rss_key));
+	for (i = 0; i < nitems(rss_key); i++) {
+		AQ_WRITE_REG(sc, RPF_RSS_KEY_WR_DATA_REG, htole32(rss_key[i]));
+		AQ_WRITE_REG_BIT(sc, RPF_RSS_KEY_ADDR_REG, RPF_RSS_KEY_ADDR,
+		    nitems(rss_key) - 1 - i);
+		AQ_WRITE_REG_BIT(sc, RPF_RSS_KEY_ADDR_REG, RPF_RSS_KEY_WR_EN,
+		    1);
+		WAIT_FOR((AQ_READ_REG(sc, RPF_RSS_KEY_ADDR_REG) &
+		    RPF_RSS_KEY_WR_EN) == 0, 1000, 10, &error);
+		if (error != 0) {
+			printf(": timed out setting rss key\n");
+			return error;
+		}
+	}
+
+	/*
+	 * the redirection table has 64 entries, each entry is a 3 bit
+	 * queue number, packed into a 16 bit register, so there are 12
+	 * registers to program.
+	 */
+	bits = 0;
+	redir = 0;
+	queue = 0;
+	for (i = 0; i < AQ_RSS_REDIR_ENTRIES; i++) {
+		while (bits < 16) {
+			redir |= (queue << bits);
+			bits += 3;
+			queue++;
+			if (queue == sc->sc_nqueues)
+				queue = 0;
+		}
+
+		AQ_WRITE_REG(sc, RPF_RSS_REDIR_WR_DATA_REG, htole16(redir));
+		AQ_WRITE_REG_BIT(sc, RPF_RSS_REDIR_ADDR_REG, RPF_RSS_REDIR_ADDR,
+		    i);
+		AQ_WRITE_REG_BIT(sc, RPF_RSS_REDIR_ADDR_REG,
+		    RPF_RSS_REDIR_WR_EN, 1);
+		WAIT_FOR((AQ_READ_REG(sc, RPF_RSS_REDIR_ADDR_REG) &
+		    RPF_RSS_REDIR_WR_EN) == 0, 1000, 10, &error);
+		if (error != 0) {
+			printf(": timed out setting rss table\n");
+			return error;
+		}
+		redir >>= 16;
+		bits -= 16;
+	}
+
+	return 0;
+}
+
+void
+aq_txring_reset(struct aq_softc *sc, struct aq_txring *tx, int start)
+{
+	daddr_t paddr;
+
+	tx->tx_prod = 0;
+	tx->tx_cons = 0;
+
+	/* empty slots? */
+
+	AQ_WRITE_REG_BIT(sc, TX_DMA_DESC_REG(tx->tx_q), TX_DMA_DESC_EN, 0);
+
+	if (start == 0)
+		return;
+
+	paddr = AQ_DMA_DVA(&tx->tx_mem);
+	AQ_WRITE_REG(sc, TX_DMA_DESC_BASE_ADDRLSW_REG(tx->tx_q), paddr);
+	AQ_WRITE_REG(sc, TX_DMA_DESC_BASE_ADDRMSW_REG(tx->tx_q),
+	    paddr >> 32);
+
+	AQ_WRITE_REG_BIT(sc, TX_DMA_DESC_REG(tx->tx_q), TX_DMA_DESC_LEN,
+	    AQ_TXD_NUM / 8);
+
+	tx->tx_prod = AQ_READ_REG(sc, TX_DMA_DESC_TAIL_PTR_REG(tx->tx_q));
+	tx->tx_cons = tx->tx_prod;
+	AQ_WRITE_REG(sc, TX_DMA_DESC_WRWB_THRESH_REG(tx->tx_q), 0);
+
+	AQ_WRITE_REG_BIT(sc, AQ_INTR_IRQ_MAP_TX_REG(tx->tx_q),
+	    AQ_INTR_IRQ_MAP_TX_IRQMAP(tx->tx_q), tx->tx_irq);
+	AQ_WRITE_REG_BIT(sc, AQ_INTR_IRQ_MAP_TX_REG(tx->tx_q),
+	    AQ_INTR_IRQ_MAP_TX_EN(tx->tx_q), 1);
+
+	AQ_WRITE_REG_BIT(sc, TX_DMA_DESC_REG(tx->tx_q), TX_DMA_DESC_EN, 1);
+
+	AQ_WRITE_REG_BIT(sc, TDM_DCAD_REG(tx->tx_q), TDM_DCAD_CPUID, 0);
+	AQ_WRITE_REG_BIT(sc, TDM_DCAD_REG(tx->tx_q), TDM_DCAD_CPUID_EN, 0);
+}
+
+void
+aq_rxring_reset(struct aq_softc *sc, struct aq_rxring *rx, int start)
+{
+	daddr_t paddr;
+	int strip;
+
+	AQ_WRITE_REG_BIT(sc, RX_DMA_DESC_REG(rx->rx_q), RX_DMA_DESC_EN, 0);
+	/* drain */
+
+	if (start == 0)
+		return;
+
+	paddr = AQ_DMA_DVA(&rx->rx_mem);
+	AQ_WRITE_REG(sc, RX_DMA_DESC_BASE_ADDRLSW_REG(rx->rx_q), paddr);
+	AQ_WRITE_REG(sc, RX_DMA_DESC_BASE_ADDRMSW_REG(rx->rx_q),
+	    paddr >> 32);
+
+	AQ_WRITE_REG_BIT(sc, RX_DMA_DESC_REG(rx->rx_q), RX_DMA_DESC_LEN,
+	    AQ_RXD_NUM / 8);
+
+	AQ_WRITE_REG_BIT(sc, RX_DMA_DESC_BUFSIZE_REG(rx->rx_q),
+	    RX_DMA_DESC_BUFSIZE_DATA, MCLBYTES / 1024);
+	AQ_WRITE_REG_BIT(sc, RX_DMA_DESC_BUFSIZE_REG(rx->rx_q),
+	    RX_DMA_DESC_BUFSIZE_HDR, 0);
+	AQ_WRITE_REG_BIT(sc, RX_DMA_DESC_REG(rx->rx_q),
+	    RX_DMA_DESC_HEADER_SPLIT, 0);
+
+#if NVLAN > 0
+	strip = 1;
+#else
+	strip = 0;
+#endif
+	AQ_WRITE_REG_BIT(sc, RX_DMA_DESC_REG(rx->rx_q),
+	    RX_DMA_DESC_VLAN_STRIP, strip);
+
+	rx->rx_cons = AQ_READ_REG(sc, RX_DMA_DESC_HEAD_PTR_REG(rx->rx_q)) &
+	    RX_DMA_DESC_HEAD_PTR;
+	AQ_WRITE_REG(sc, RX_DMA_DESC_TAIL_PTR_REG(rx->rx_q), rx->rx_cons);
+	rx->rx_prod = rx->rx_cons;
+
+	AQ_WRITE_REG_BIT(sc, AQ_INTR_IRQ_MAP_RX_REG(rx->rx_q),
+	    AQ_INTR_IRQ_MAP_RX_IRQMAP(rx->rx_q), rx->rx_irq);
+	AQ_WRITE_REG_BIT(sc, AQ_INTR_IRQ_MAP_RX_REG(rx->rx_q),
+	    AQ_INTR_IRQ_MAP_RX_EN(rx->rx_q), 1);
+
+	AQ_WRITE_REG_BIT(sc, RX_DMA_DCAD_REG(rx->rx_q),
+	    RX_DMA_DCAD_CPUID, 0);
+	AQ_WRITE_REG_BIT(sc, RX_DMA_DCAD_REG(rx->rx_q),
+	    RX_DMA_DCAD_DESC_EN, 0);
+	AQ_WRITE_REG_BIT(sc, RX_DMA_DCAD_REG(rx->rx_q),
+	    RX_DMA_DCAD_HEADER_EN, 0);
+	AQ_WRITE_REG_BIT(sc, RX_DMA_DCAD_REG(rx->rx_q),
+	    RX_DMA_DCAD_PAYLOAD_EN, 0);
+
+	AQ_WRITE_REG_BIT(sc, RX_DMA_DESC_REG(rx->rx_q), RX_DMA_DESC_EN, 1);
+}
+
+static inline unsigned int
+aq_rx_fill_slots(struct aq_softc *sc, struct aq_rxring *rx, uint nslots)
+{
+	struct aq_rx_desc_read *ring, *rd;
+	struct aq_slot *as;
+	struct mbuf *m;
+	uint p, fills;
+
+	ring = AQ_DMA_KVA(&rx->rx_mem);
+	p = rx->rx_prod;
+
+	bus_dmamap_sync(sc->sc_dmat, AQ_DMA_MAP(&rx->rx_mem), 0,
+	    AQ_DMA_LEN(&rx->rx_mem), BUS_DMASYNC_POSTWRITE);
+
+	for (fills = 0; fills < nslots; fills++) {
+		as = &rx->rx_slots[p];
+		rd = &ring[p];
+
+		m = MCLGETL(NULL, M_DONTWAIT, MCLBYTES + ETHER_ALIGN);
+		if (m == NULL)
+			break;
+
+		m->m_data += (m->m_ext.ext_size - (MCLBYTES + ETHER_ALIGN));
+		m->m_data += ETHER_ALIGN;
+		m->m_len = m->m_pkthdr.len = MCLBYTES;
+
+		if (bus_dmamap_load_mbuf(sc->sc_dmat, as->as_map, m,
+		    BUS_DMA_NOWAIT) != 0) {
+			m_freem(m);
+			break;
+		}
+		as->as_m = m;
+
+		bus_dmamap_sync(sc->sc_dmat, as->as_map, 0,
+		    as->as_map->dm_mapsize, BUS_DMASYNC_PREREAD);
+		htolem64(&rd->buf_addr, as->as_map->dm_segs[0].ds_addr);
+		rd->hdr_addr = 0;
+		p++;
+		if (p == AQ_RXD_NUM)
+			p = 0;
+	}
+
+	bus_dmamap_sync(sc->sc_dmat, AQ_DMA_MAP(&rx->rx_mem), 0,
+	    AQ_DMA_LEN(&rx->rx_mem), BUS_DMASYNC_PREWRITE);
+
+	rx->rx_prod = p;
+	AQ_WRITE_REG(sc, RX_DMA_DESC_TAIL_PTR_REG(rx->rx_q), rx->rx_prod);
+	return (nslots - fills);
+}
+
+int
+aq_rx_fill(struct aq_softc *sc, struct aq_rxring *rx)
+{
+	u_int slots;
+
+	slots = if_rxr_get(&rx->rx_rxr, AQ_RXD_NUM);
+	if (slots == 0)
+		return 1;
+
+	slots = aq_rx_fill_slots(sc, rx, slots);
+	if_rxr_put(&rx->rx_rxr, slots);
+	return 0;
+}
+
+void
+aq_refill(void *xq)
+{
+	struct aq_queues *q = xq;
+	struct aq_softc *sc = q->q_sc;
+
+	aq_rx_fill(sc, &q->q_rx);
+
+	if (if_rxr_inuse(&q->q_rx.rx_rxr) == 0)
+		timeout_add(&q->q_rx.rx_refill, 1);
+}
+
+void
+aq_rxeof(struct aq_softc *sc, struct aq_rxring *rx)
+{
+	struct ifnet *ifp = &sc->sc_arpcom.ac_if;
+	struct aq_rx_desc_wb *rxd;
+	struct aq_rx_desc_wb *ring;
+	struct aq_slot *as;
+	uint32_t end, idx;
+	uint16_t pktlen, status;
+	uint32_t rxd_type;
+	struct mbuf *m, *mb;
+	struct mbuf_list ml = MBUF_LIST_INITIALIZER();
+	int rxfree;
+
+	if (!ISSET(ifp->if_flags, IFF_RUNNING))
+		return;
+
+	end = AQ_READ_REG(sc, RX_DMA_DESC_HEAD_PTR_REG(rx->rx_q)) &
+	    RX_DMA_DESC_HEAD_PTR;
+
+	bus_dmamap_sync(sc->sc_dmat, AQ_DMA_MAP(&rx->rx_mem), 0,
+	    AQ_DMA_LEN(&rx->rx_mem), BUS_DMASYNC_POSTREAD);
+
+	rxfree = 0;
+	idx = rx->rx_cons;
+	ring = AQ_DMA_KVA(&rx->rx_mem);
+	while (idx != end) {
+		rxd = &ring[idx];
+		as = &rx->rx_slots[idx];
+
+		bus_dmamap_sync(sc->sc_dmat, as->as_map, 0,
+		    as->as_map->dm_mapsize, BUS_DMASYNC_POSTREAD);
+		bus_dmamap_unload(sc->sc_dmat, as->as_map);
+
+		status = lemtoh16(&rxd->status);
+		if ((status & AQ_RXDESC_STATUS_DD) == 0)
+			break;
+
+		rxfree++;
+		mb = as->as_m;
+		as->as_m = NULL;
+
+		pktlen = lemtoh16(&rxd->pkt_len);
+		rxd_type = lemtoh32(&rxd->type);
+		if ((rxd_type & AQ_RXDESC_TYPE_RSSTYPE) != 0) {
+			mb->m_pkthdr.ph_flowid = lemtoh32(&rxd->rss_hash);
+			mb->m_pkthdr.csum_flags |= M_FLOWID;
+		}
+
+		mb->m_pkthdr.len = 0;
+		mb->m_next = NULL;
+		*rx->rx_m_tail = mb;
+		rx->rx_m_tail = &mb->m_next;
+
+		m = rx->rx_m_head;
+
+#if NVLAN > 0
+		if (rxd_type & (AQ_RXDESC_TYPE_VLAN | AQ_RXDESC_TYPE_VLAN2)) {
+			m->m_pkthdr.ether_vtag = lemtoh16(&rxd->vlan);
+			m->m_flags |= M_VLANTAG;
+		}
+#endif
+
+		if ((rxd_type & AQ_RXDESC_TYPE_V4_SUM) &&
+		    ((status & AQ_RXDESC_STATUS_V4_SUM_NG) == 0))
+			m->m_pkthdr.csum_flags |= M_IPV4_CSUM_IN_OK;
+
+		if ((rxd_type & AQ_RXDESC_TYPE_L4_SUM) &&
+		   (status & AQ_RXDESC_STATUS_L4_SUM_OK))
+			m->m_pkthdr.csum_flags |= M_UDP_CSUM_IN_OK |
+			    M_TCP_CSUM_IN_OK;
+
+		if ((status & AQ_RXDESC_STATUS_MACERR) ||
+		    (rxd_type & AQ_RXDESC_TYPE_DMA_ERR)) {
+			printf("%s:rx: rx error (status %x type %x)\n",
+			    DEVNAME(sc), status, rxd_type);
+			rx->rx_m_error = 1;
+		}
+
+		if (status & AQ_RXDESC_STATUS_EOP) {
+			mb->m_len = pktlen - m->m_pkthdr.len;
+			m->m_pkthdr.len = pktlen;
+			if (rx->rx_m_error != 0) {
+				ifp->if_ierrors++;
+				m_freem(m);
+			} else {
+				ml_enqueue(&ml, m);
+			}
+
+			rx->rx_m_head = NULL;
+			rx->rx_m_tail = &rx->rx_m_head;
+			rx->rx_m_error = 0;
+		} else {
+			mb->m_len = MCLBYTES;
+			m->m_pkthdr.len += mb->m_len;
+		}
+
+		idx++;
+		if (idx == AQ_RXD_NUM)
+			idx = 0;
+	}
+
+	bus_dmamap_sync(sc->sc_dmat, AQ_DMA_MAP(&rx->rx_mem), 0,
+	    AQ_DMA_LEN(&rx->rx_mem), BUS_DMASYNC_PREREAD);
+
+	rx->rx_cons = idx;
+
+	if (rxfree > 0) {
+		if_rxr_put(&rx->rx_rxr, rxfree);
+		if (ifiq_input(rx->rx_ifiq, &ml))
+			if_rxr_livelocked(&rx->rx_rxr);
+
+		aq_rx_fill(sc, rx);
+		if (if_rxr_inuse(&rx->rx_rxr) == 0)
+			timeout_add(&rx->rx_refill, 1);
+	}
+}
+
+void
+aq_txeof(struct aq_softc *sc, struct aq_txring *tx)
+{
+	struct ifnet *ifp = &sc->sc_arpcom.ac_if;
+	struct aq_slot *as;
+	uint32_t idx, end, free;
+
+	if (!ISSET(ifp->if_flags, IFF_RUNNING))
+		return;
+
+	idx = tx->tx_cons;
+	end = AQ_READ_REG(sc, TX_DMA_DESC_HEAD_PTR_REG(tx->tx_q)) &
+	    TX_DMA_DESC_HEAD_PTR;
+	free = 0;
+
+	bus_dmamap_sync(sc->sc_dmat, AQ_DMA_MAP(&tx->tx_mem), 0,
+	    AQ_DMA_LEN(&tx->tx_mem), BUS_DMASYNC_POSTREAD);
+
+	while (idx != end) {
+		as = &tx->tx_slots[idx];
+
+		if (as->as_m != NULL) {
+			bus_dmamap_sync(sc->sc_dmat, as->as_map, 0,
+			    as->as_map->dm_mapsize, BUS_DMASYNC_POSTWRITE);
+			bus_dmamap_unload(sc->sc_dmat, as->as_map);
+
+			m_freem(as->as_m);
+			as->as_m = NULL;
+		}
+
+		idx++;
+		if (idx == AQ_TXD_NUM)
+			idx = 0;
+		free++;
+	}
+
+	bus_dmamap_sync(sc->sc_dmat, AQ_DMA_MAP(&tx->tx_mem), 0,
+	    AQ_DMA_LEN(&tx->tx_mem), BUS_DMASYNC_PREREAD);
+
+	tx->tx_cons = idx;
+
+	if (free != 0) {
+		if (ifq_is_oactive(tx->tx_ifq))
+			ifq_restart(tx->tx_ifq);
+	}
+}
+
+void
+aq_start(struct ifqueue *ifq)
+{
+	struct aq_queues *aq = ifq->ifq_softc;
+	struct aq_softc *sc = aq->q_sc;
+	struct aq_txring *tx = &aq->q_tx;
+	struct aq_tx_desc *ring, *txd;
+	struct aq_slot *as;
+	struct mbuf *m;
+	uint32_t idx, free, used, ctl1, ctl2;
+	int error, i;
+
+	idx = tx->tx_prod;
+	free = tx->tx_cons + AQ_TXD_NUM - tx->tx_prod;
+	used = 0;
+
+	bus_dmamap_sync(sc->sc_dmat, AQ_DMA_MAP(&tx->tx_mem), 0,
+	    AQ_DMA_LEN(&tx->tx_mem), BUS_DMASYNC_POSTWRITE);
+	ring = (struct aq_tx_desc *)AQ_DMA_KVA(&tx->tx_mem);
+
+	for (;;) {
+		if (used + AQ_TX_MAX_SEGMENTS + 1 >= free) {
+			ifq_set_oactive(ifq);
+			break;
+		}
+
+		m = ifq_dequeue(ifq);
+		if (m == NULL)
+			break;
+
+		as = &tx->tx_slots[idx];
+
+		error = bus_dmamap_load_mbuf(sc->sc_dmat, as->as_map, m,
+		    BUS_DMA_STREAMING | BUS_DMA_NOWAIT);
+		if (error == EFBIG) {
+			if (m_defrag(m, M_DONTWAIT)) {
+				m_freem(m);
+				break;
+			}
+
+			error = bus_dmamap_load_mbuf(sc->sc_dmat, as->as_map,
+			    m, BUS_DMA_STREAMING | BUS_DMA_NOWAIT);
+		}
+		if (error != 0) {
+			m_freem(m);
+			break;
+		}
+
+		as->as_m = m;
+
+#if NBPFILTER > 0
+		if (ifq->ifq_if->if_bpf)
+			bpf_mtap_ether(ifq->ifq_if->if_bpf, m, BPF_DIRECTION_OUT);
+#endif
+		bus_dmamap_sync(sc->sc_dmat, as->as_map, 0,
+		    as->as_map->dm_mapsize, BUS_DMASYNC_PREWRITE);
+
+		ctl2 = m->m_pkthdr.len << AQ_TXDESC_CTL2_LEN_SHIFT;
+		ctl1 = AQ_TXDESC_CTL1_TYPE_TXD | AQ_TXDESC_CTL1_CMD_FCS;
+#if NVLAN > 0
+		if (m->m_flags & M_VLANTAG) {
+			txd = ring + idx;
+			txd->buf_addr = 0;
+			txd->ctl1 = htole32(AQ_TXDESC_CTL1_TYPE_TXC |
+			    (m->m_pkthdr.ether_vtag << AQ_TXDESC_CTL1_VLAN_SHIFT));
+			txd->ctl2 = 0;
+
+			ctl1 |= AQ_TXDESC_CTL1_CMD_VLAN;
+			ctl2 |= AQ_TXDESC_CTL2_CTX_EN;
+
+			idx++;
+			if (idx == AQ_TXD_NUM)
+				idx = 0;
+			used++;
+		}
+#endif
+
+		if (m->m_pkthdr.csum_flags & M_IPV4_CSUM_OUT)
+			ctl1 |= AQ_TXDESC_CTL1_CMD_IP4CSUM;
+		if (m->m_pkthdr.csum_flags & (M_TCP_CSUM_OUT | M_UDP_CSUM_OUT))
+			ctl1 |= AQ_TXDESC_CTL1_CMD_L4CSUM;
+
+		for (i = 0; i < as->as_map->dm_nsegs; i++) {
+
+			if (i == as->as_map->dm_nsegs - 1)
+				ctl1 |= AQ_TXDESC_CTL1_CMD_EOP |
+				    AQ_TXDESC_CTL1_CMD_WB;
+
+			txd = ring + idx;
+			txd->buf_addr = htole64(as->as_map->dm_segs[i].ds_addr);
+			txd->ctl1 = htole32(ctl1 |
+			    (as->as_map->dm_segs[i].ds_len <<
+			    AQ_TXDESC_CTL1_BLEN_SHIFT));
+			txd->ctl2 = htole32(ctl2);
+
+			idx++;
+			if (idx == AQ_TXD_NUM)
+				idx = 0;
+			used++;
+		}
+	}
+
+	bus_dmamap_sync(sc->sc_dmat, AQ_DMA_MAP(&tx->tx_mem), 0,
+	    AQ_DMA_LEN(&tx->tx_mem), BUS_DMASYNC_PREWRITE);
+
+	if (used != 0) {
+		tx->tx_prod = idx;
+		AQ_WRITE_REG(sc, TX_DMA_DESC_TAIL_PTR_REG(tx->tx_q),
+		    tx->tx_prod);
+	}
+}
+
+int
+aq_intr_queue(void *arg)
+{
+	struct aq_queues *aq = arg;
+	struct aq_softc *sc = aq->q_sc;
+	uint32_t status;
+	uint32_t clear;
+
+	status = AQ_READ_REG(sc, AQ_INTR_STATUS_REG);
+	clear = 0;
+	if (status & (1 << aq->q_tx.tx_irq)) {
+		clear |= (1 << aq->q_tx.tx_irq);
+		aq_txeof(sc, &aq->q_tx);
+	}
+
+	if (status & (1 << aq->q_rx.rx_irq)) {
+		clear |= (1 << aq->q_rx.rx_irq);
+		aq_rxeof(sc, &aq->q_rx);
+	}
+
+	AQ_WRITE_REG(sc, AQ_INTR_STATUS_CLR_REG, clear);
+	return (clear != 0);
+}
+
+int
+aq_intr_link(void *arg)
+{
+	struct aq_softc *sc = arg;
+	uint32_t status;
+
+	status = AQ_READ_REG(sc, AQ_INTR_STATUS_REG);
+	if (status & (1 << sc->sc_linkstat_irq)) {
+		aq_update_link_status(sc);
+		AQ_WRITE_REG(sc, AQ_INTR_STATUS_REG, (1 << sc->sc_linkstat_irq));
+		return 1;
+	}
+
+	return 0;
+}
+
+int
+aq_intr(void *arg)
+{
+	struct aq_softc *sc = arg;
+	struct aq_queues *aq = &sc->sc_queues[0];
+	uint32_t status;
+
+	status = AQ_READ_REG(sc, AQ_INTR_STATUS_REG);
+	AQ_WRITE_REG(sc, AQ_INTR_STATUS_CLR_REG, 0xffffffff);
+
+	if (status & (1 << sc->sc_linkstat_irq))
+		aq_update_link_status(sc);
+
+	if (status & (1 << aq->q_tx.tx_irq)) {
+		aq_txeof(sc, &aq->q_tx);
+		AQ_WRITE_REG(sc, AQ_INTR_STATUS_CLR_REG,
+		    (1 << aq->q_tx.tx_irq));
+	}
+	if (status & (1 << aq->q_rx.rx_irq)) {
+		aq_rxeof(sc, &aq->q_rx);
+		AQ_WRITE_REG(sc, AQ_INTR_STATUS_CLR_REG,
+		    (1 << aq->q_rx.rx_irq));
+	}
+
+	return 1;
+}
+
+void
+aq_watchdog(struct ifnet *ifp)
+{
+
+}
+
+void
+aq_free_slots(struct aq_softc *sc, struct aq_slot *slots, int allocated,
+    int total)
+{
+	struct aq_slot *as;
+
+	int i = allocated;
+	while (i-- > 0) {
+		as = &slots[i];
+		bus_dmamap_destroy(sc->sc_dmat, as->as_map);
+		if (as->as_m != NULL)
+			m_freem(as->as_m);
+	}
+	free(slots, M_DEVBUF, total * sizeof(*as));
+}
+
+int
+aq_queue_up(struct aq_softc *sc, struct aq_queues *aq)
+{
+	struct aq_rxring *rx;
+	struct aq_txring *tx;
+	struct aq_slot *as;
+	int i, mtu;
+
+	rx = &aq->q_rx;
+	rx->rx_slots = mallocarray(sizeof(*as), AQ_RXD_NUM, M_DEVBUF,
+	    M_WAITOK | M_ZERO);
+	if (rx->rx_slots == NULL) {
+		printf("%s: failed to allocate rx slots %d\n", DEVNAME(sc),
+		    aq->q_index);
+		return ENOMEM;
+	}
+
+	for (i = 0; i < AQ_RXD_NUM; i++) {
+		as = &rx->rx_slots[i];
+		if (bus_dmamap_create(sc->sc_dmat, MCLBYTES, 1, MCLBYTES, 0,
+		    BUS_DMA_WAITOK | BUS_DMA_ALLOCNOW | BUS_DMA_64BIT,
+		    &as->as_map) != 0) {
+			printf("%s: failed to allocate rx dma maps %d\n",
+			    DEVNAME(sc), aq->q_index);
+			goto destroy_rx_slots;
+		}
+	}
+
+	if (aq_dmamem_alloc(sc, &rx->rx_mem, AQ_RXD_NUM *
+	    sizeof(struct aq_rx_desc_read), PAGE_SIZE) != 0) {
+		printf("%s: unable to allocate rx ring %d\n", DEVNAME(sc),
+		    aq->q_index);
+		goto destroy_rx_slots;
+	}
+
+	tx = &aq->q_tx;
+	tx->tx_slots = mallocarray(sizeof(*as), AQ_TXD_NUM, M_DEVBUF,
+	    M_WAITOK | M_ZERO);
+	if (tx->tx_slots == NULL) {
+		printf("%s: failed to allocate tx slots %d\n", DEVNAME(sc),
+		    aq->q_index);
+		goto destroy_rx_ring;
+	}
+
+	mtu = sc->sc_arpcom.ac_if.if_hardmtu;
+	for (i = 0; i < AQ_TXD_NUM; i++) {
+		as = &tx->tx_slots[i];
+		if (bus_dmamap_create(sc->sc_dmat, mtu, AQ_TX_MAX_SEGMENTS,
+		    MCLBYTES, 0, BUS_DMA_WAITOK | BUS_DMA_ALLOCNOW | BUS_DMA_64BIT,
+		    &as->as_map) != 0) {
+			printf("%s: failed to allocated tx dma maps %d\n",
+			    DEVNAME(sc), aq->q_index);
+			goto destroy_tx_slots;
+		}
+	}
+
+	if (aq_dmamem_alloc(sc, &tx->tx_mem, AQ_TXD_NUM *
+	    sizeof(struct aq_tx_desc), PAGE_SIZE) != 0) {
+		printf("%s: unable to allocate tx ring %d\n", DEVNAME(sc),
+		    aq->q_index);
+		goto destroy_tx_slots;
+	}
+
+	bus_dmamap_sync(sc->sc_dmat, AQ_DMA_MAP(&tx->tx_mem),
+	    0, AQ_DMA_LEN(&tx->tx_mem),
+	    BUS_DMASYNC_PREREAD|BUS_DMASYNC_PREWRITE);
+
+	bus_dmamap_sync(sc->sc_dmat, AQ_DMA_MAP(&rx->rx_mem),
+	    0, AQ_DMA_LEN(&rx->rx_mem),
+	    BUS_DMASYNC_PREREAD|BUS_DMASYNC_PREWRITE);
+
+	aq_txring_reset(sc, tx, 1);
+	aq_rxring_reset(sc, rx, 1);
+	return 0;
+
+destroy_tx_slots:
+	aq_free_slots(sc, tx->tx_slots, i, AQ_TXD_NUM);
+	tx->tx_slots = NULL;
+	i = AQ_RXD_NUM;
+
+destroy_rx_ring:
+	aq_dmamem_free(sc, &rx->rx_mem);
+destroy_rx_slots:
+	aq_free_slots(sc, rx->rx_slots, i, AQ_RXD_NUM);
+	rx->rx_slots = NULL;
+	return ENOMEM;
+}
+
+void
+aq_queue_down(struct aq_softc *sc, struct aq_queues *aq)
+{
+	struct aq_txring *tx;
+	struct aq_rxring *rx;
+
+	tx = &aq->q_tx;
+	aq_txring_reset(sc, &aq->q_tx, 0);
+	if (tx->tx_slots != NULL) {
+		aq_free_slots(sc, tx->tx_slots, AQ_TXD_NUM, AQ_TXD_NUM);
+		tx->tx_slots = NULL;
+	}
+
+	bus_dmamap_sync(sc->sc_dmat, AQ_DMA_MAP(&tx->tx_mem),
+	    0, AQ_DMA_LEN(&tx->tx_mem),
+	    BUS_DMASYNC_POSTREAD|BUS_DMASYNC_POSTWRITE);
+
+	aq_dmamem_free(sc, &tx->tx_mem);
+
+	rx = &aq->q_rx;
+	m_freem(rx->rx_m_head);
+	rx->rx_m_head = NULL;
+	rx->rx_m_tail = &rx->rx_m_head;
+	rx->rx_m_error = 0;
+	aq_rxring_reset(sc, &aq->q_rx, 0);
+	if (rx->rx_slots != NULL) {
+		aq_free_slots(sc, rx->rx_slots, AQ_RXD_NUM, AQ_RXD_NUM);
+		rx->rx_slots = NULL;
+	}
+
+	bus_dmamap_sync(sc->sc_dmat, AQ_DMA_MAP(&rx->rx_mem),
+	    0, AQ_DMA_LEN(&rx->rx_mem),
+	    BUS_DMASYNC_POSTREAD|BUS_DMASYNC_POSTWRITE);
+
+	aq_dmamem_free(sc, &rx->rx_mem);
+}
+
+void
+aq_invalidate_rx_desc_cache(struct aq_softc *sc)
+{
+	uint32_t cache;
+
+	cache = AQ_READ_REG(sc, RX_DMA_DESC_CACHE_INIT_REG);
+	AQ_WRITE_REG_BIT(sc, RX_DMA_DESC_CACHE_INIT_REG, RX_DMA_DESC_CACHE_INIT,
+	    (cache & RX_DMA_DESC_CACHE_INIT) ^ RX_DMA_DESC_CACHE_INIT);
+}
+
+int
+aq_up(struct aq_softc *sc)
+{
+	struct ifnet *ifp = &sc->sc_arpcom.ac_if;
+	int i;
+
+	aq_invalidate_rx_desc_cache(sc);
+
+	for (i = 0; i < sc->sc_nqueues; i++) {
+		if (aq_queue_up(sc, &sc->sc_queues[i]) != 0)
+			goto downqueues;
+	}
+
+	aq_set_mac_addr(sc, AQ_HW_MAC_OWN, sc->sc_arpcom.ac_enaddr);
+
+	AQ_WRITE_REG_BIT(sc, TPO_HWCSUM_REG, TPO_HWCSUM_IP4CSUM_EN, 1);
+	AQ_WRITE_REG_BIT(sc, TPO_HWCSUM_REG, TPO_HWCSUM_L4CSUM_EN, 1);
+
+	AQ_WRITE_REG_BIT(sc, RPO_HWCSUM_REG, RPO_HWCSUM_IP4CSUM_EN, 1);
+	AQ_WRITE_REG_BIT(sc, RPO_HWCSUM_REG, RPO_HWCSUM_L4CSUM_EN, 1);
+
+	SET(ifp->if_flags, IFF_RUNNING);
+	aq_enable_intr(sc, 1, 1);
+	AQ_WRITE_REG_BIT(sc, TPB_TX_BUF_REG, TPB_TX_BUF_EN, 1);
+	AQ_WRITE_REG_BIT(sc, RPB_RPF_RX_REG, RPB_RPF_RX_BUF_EN, 1);
+
+	for (i = 0; i < sc->sc_nqueues; i++) {
+		struct aq_queues *aq = &sc->sc_queues[i];
+
+		if_rxr_init(&aq->q_rx.rx_rxr, howmany(ifp->if_hardmtu, MCLBYTES),
+		    AQ_RXD_NUM - 1);
+		aq_rx_fill(sc, &aq->q_rx);
+
+		ifq_clr_oactive(aq->q_tx.tx_ifq);
+	}
+
+	return ENETRESET;
+
+downqueues:
+	for (i = 0; i < sc->sc_nqueues; i++)
+		aq_queue_down(sc, &sc->sc_queues[i]);
+	return ENOMEM;
+}
+
+void
+aq_down(struct aq_softc *sc)
+{
+	struct ifnet *ifp = &sc->sc_arpcom.ac_if;
+	int i;
+
+	CLR(ifp->if_flags, IFF_RUNNING);
+
+	aq_enable_intr(sc, 1, 0);
+	intr_barrier(sc->sc_ih);
+
+	AQ_WRITE_REG_BIT(sc, RPB_RPF_RX_REG, RPB_RPF_RX_BUF_EN, 0);
+	for (i = 0; i < sc->sc_nqueues; i++) {
+		/* queue intr barrier? */
+		aq_queue_down(sc, &sc->sc_queues[i]);
+	}
+
+	aq_invalidate_rx_desc_cache(sc);
+}
+
+void
+aq_enable_intr(struct aq_softc *sc, int link, int txrx)
+{
+	uint32_t imask = 0;
+	int i;
+
+	if (txrx) {
+		for (i = 0; i < sc->sc_nqueues; i++) {
+			imask |= (1 << sc->sc_queues[i].q_tx.tx_irq);
+			imask |= (1 << sc->sc_queues[i].q_rx.rx_irq);
+		}
+	}
+
+	if (link)
+		imask |= (1 << sc->sc_linkstat_irq);
+
+	AQ_WRITE_REG(sc, AQ_INTR_MASK_REG, imask);
+	AQ_WRITE_REG(sc, AQ_INTR_STATUS_CLR_REG, 0xffffffff);
+}
+
+void
+aq_ifmedia_status(struct ifnet *ifp, struct ifmediareq *ifmr)
+{
+	struct aq_softc *aq = ifp->if_softc;
+	enum aq_link_speed speed;
+	enum aq_link_fc fc;
+	int media;
+	int flow;
+
+	if (aq_get_linkmode(aq, &speed, &fc, NULL) != 0)
+		return;
+
+	switch (speed) {
+	case AQ_LINK_10G:
+		media = IFM_10G_T;
+		break;
+	case AQ_LINK_5G:
+		media = IFM_5000_T;
+		break;
+	case AQ_LINK_2G5:
+		media = IFM_2500_T;
+		break;
+	case AQ_LINK_1G:
+		media = IFM_1000_T;
+		break;
+	case AQ_LINK_100M:
+		media = IFM_100_TX;
+		break;
+	case AQ_LINK_10M:
+		media = IFM_10_T;
+		break;
+	case AQ_LINK_NONE:
+		media = 0;
+		break;
+	}
+
+	flow = 0;
+	if (fc & AQ_FC_RX)
+		flow |= IFM_ETH_RXPAUSE;
+	if (fc & AQ_FC_TX)
+		flow |= IFM_ETH_TXPAUSE;
+
+	ifmr->ifm_status = IFM_AVALID;
+	if (speed != AQ_LINK_NONE) {
+		ifmr->ifm_status |= IFM_ACTIVE;
+		ifmr->ifm_active = IFM_ETHER | IFM_AUTO | media | flow;
+	}
+}
+
+int
+aq_ifmedia_change(struct ifnet *ifp)
+{
+	struct aq_softc *sc = ifp->if_softc;
+	enum aq_link_speed rate = AQ_LINK_NONE;
+	enum aq_link_fc fc = AQ_FC_NONE;
 
 	if (IFM_TYPE(sc->sc_media.ifm_media) != IFM_ETHER)
 		return EINVAL;
@@ -3802,2369 +3709,226 @@ aq_ifmedia_change(struct ifnet * const ifp)
 		rate = AQ_LINK_10G;
 		break;
 	default:
-		device_printf(sc->sc_dev, "unknown media: 0x%X\n",
-		    IFM_SUBTYPE(sc->sc_media.ifm_media));
 		return ENODEV;
 	}
 
 	if (sc->sc_media.ifm_media & IFM_FLOW)
 		fc = AQ_FC_ALL;
 
-	/* XXX: todo EEE */
-
-	/* re-initialize hardware with new parameters */
-	aq_set_linkmode(sc, rate, fc, eee);
-
-	return 0;
+	return aq_set_linkmode(sc, rate, fc, AQ_EEE_DISABLE);
 }
 
-static void
-aq_ifmedia_status(struct ifnet * const ifp, struct ifmediareq *ifmr)
-{
-	struct aq_softc * const sc = ifp->if_softc;
-
-	/* update ifm_active */
-	ifmr->ifm_active = IFM_ETHER;
-	if (sc->sc_link_fc & AQ_FC_RX)
-		ifmr->ifm_active |= IFM_ETH_RXPAUSE;
-	if (sc->sc_link_fc & AQ_FC_TX)
-		ifmr->ifm_active |= IFM_ETH_TXPAUSE;
-
-	/* XXX: need to detect fulldup or halfdup */
-	switch (sc->sc_link_rate) {
-	case AQ_LINK_10M:
-		ifmr->ifm_active |= IFM_10_T | IFM_FDX;
-		break;
-	case AQ_LINK_100M:
-		ifmr->ifm_active |= IFM_100_TX | IFM_FDX;
-		break;
-	case AQ_LINK_1G:
-		ifmr->ifm_active |= IFM_1000_T | IFM_FDX;
-		break;
-	case AQ_LINK_2G5:
-		ifmr->ifm_active |= IFM_2500_T | IFM_FDX;
-		break;
-	case AQ_LINK_5G:
-		ifmr->ifm_active |= IFM_5000_T | IFM_FDX;
-		break;
-	case AQ_LINK_10G:
-		ifmr->ifm_active |= IFM_10G_T | IFM_FDX;
-		break;
-	default:
-		ifmr->ifm_active |= IFM_NONE;
-		break;
-	}
-
-	/* update ifm_status */
-	ifmr->ifm_status = IFM_AVALID;
-	if (sc->sc_link_rate != AQ_LINK_NONE)
-		ifmr->ifm_status |= IFM_ACTIVE;
-}
-
-static void
-aq_initmedia(struct aq_softc *sc)
-{
-#define IFMEDIA_ETHER_ADD(sc, media)	\
-	ifmedia_add(&(sc)->sc_media, IFM_ETHER | media, 0, NULL);
-
-	IFMEDIA_ETHER_ADD(sc, IFM_NONE);
-
-	if (sc->sc_available_rates & AQ_LINK_10M) {
-		IFMEDIA_ETHER_ADD(sc, IFM_10_T);
-		IFMEDIA_ETHER_ADD(sc, IFM_10_T | IFM_FDX);
-	}
-	if (sc->sc_available_rates & AQ_LINK_100M) {
-		IFMEDIA_ETHER_ADD(sc, IFM_100_TX);
-		IFMEDIA_ETHER_ADD(sc, IFM_100_TX | IFM_FLOW);
-		IFMEDIA_ETHER_ADD(sc, IFM_100_TX | IFM_FDX | IFM_FLOW);
-	}
-	if (sc->sc_available_rates & AQ_LINK_1G) {
-		IFMEDIA_ETHER_ADD(sc, IFM_1000_T | IFM_FDX);
-		IFMEDIA_ETHER_ADD(sc, IFM_1000_T | IFM_FDX | IFM_FLOW);
-	}
-	if (sc->sc_available_rates & AQ_LINK_2G5) {
-		IFMEDIA_ETHER_ADD(sc, IFM_2500_T | IFM_FDX);
-		IFMEDIA_ETHER_ADD(sc, IFM_2500_T | IFM_FDX | IFM_FLOW);
-	}
-	if (sc->sc_available_rates & AQ_LINK_5G) {
-		IFMEDIA_ETHER_ADD(sc, IFM_5000_T | IFM_FDX);
-		IFMEDIA_ETHER_ADD(sc, IFM_5000_T | IFM_FDX | IFM_FLOW);
-	}
-	if (sc->sc_available_rates & AQ_LINK_10G) {
-		IFMEDIA_ETHER_ADD(sc, IFM_10G_T | IFM_FDX);
-		IFMEDIA_ETHER_ADD(sc, IFM_10G_T | IFM_FDX | IFM_FLOW);
-	}
-	IFMEDIA_ETHER_ADD(sc, IFM_AUTO);
-	IFMEDIA_ETHER_ADD(sc, IFM_AUTO | IFM_FLOW);
-
-	/* default: auto without flowcontrol */
-	ifmedia_set(&sc->sc_media, IFM_ETHER | IFM_AUTO);
-	aq_set_linkmode(sc, AQ_LINK_AUTO, AQ_FC_NONE, AQ_EEE_DISABLE);
-}
-
-static int
-aq_set_linkmode(struct aq_softc *sc, aq_link_speed_t speed, aq_link_fc_t fc,
-    aq_link_eee_t eee)
-{
-	return sc->sc_fw_ops->set_mode(sc, MPI_INIT, speed, fc, eee);
-}
-
-static int
-aq_get_linkmode(struct aq_softc *sc, aq_link_speed_t *speed, aq_link_fc_t *fc,
-   aq_link_eee_t *eee)
-{
-	aq_hw_fw_mpi_state_t mode;
-	int error;
-
-	error = sc->sc_fw_ops->get_mode(sc, &mode, speed, fc, eee);
-	if (error != 0)
-		return error;
-	if (mode != MPI_INIT)
-		return ENXIO;
-
-	return 0;
-}
-
-static void
-aq_hw_init_tx_path(struct aq_softc *sc)
-{
-	/* Tx TC/RSS number config */
-	AQ_WRITE_REG_BIT(sc, TPB_TX_BUF_REG, TPB_TX_BUF_TC_MODE,
-	    (sc->sc_tc_mode == 4) ? 1 : 0);
-
-	AQ_WRITE_REG_BIT(sc, THM_LSO_TCP_FLAG1_REG,
-	    THM_LSO_TCP_FLAG1_FIRST, 0x0ff6);
-	AQ_WRITE_REG_BIT(sc, THM_LSO_TCP_FLAG1_REG,
-	    THM_LSO_TCP_FLAG1_MID,   0x0ff6);
-	AQ_WRITE_REG_BIT(sc, THM_LSO_TCP_FLAG2_REG,
-	   THM_LSO_TCP_FLAG2_LAST,  0x0f7f);
-
-	/* misc */
-	AQ_WRITE_REG(sc, TX_TPO2_REG,
-	   (sc->sc_features & FEATURES_TPO2) ? TX_TPO2_EN : 0);
-	AQ_WRITE_REG_BIT(sc, TDM_DCA_REG, TDM_DCA_EN, 0);
-	AQ_WRITE_REG_BIT(sc, TDM_DCA_REG, TDM_DCA_MODE, 0);
-
-	AQ_WRITE_REG_BIT(sc, TPB_TX_BUF_REG, TPB_TX_BUF_SCP_INS_EN, 1);
-
-	if ((sc->sc_features & FEATURES_AQ1_REV_B) || HWTYPE_AQ2_P(sc)) {
-		AQ_WRITE_REG_BIT(sc, TPB_TX_BUF_REG, TPB_TX_BUF_CLK_GATE_EN, 0);
-	}
-}
-
-static void
-aq_hw_init_rx_path(struct aq_softc *sc)
-{
-	int i;
-
-	/* Rx TC/RSS number config */
-	AQ_WRITE_REG_BIT(sc, RPB_RPF_RX_REG, RPB_RPF_RX_TC_MODE,
-	    (sc->sc_tc_mode == 4) ? 1 : 0);
-
-	/* Rx flow control */
-	AQ_WRITE_REG_BIT(sc, RPB_RPF_RX_REG, RPB_RPF_RX_FC_MODE, 0);
-
-	if (HWTYPE_AQ2_P(sc)) {
-		AQ_WRITE_REG_BIT(sc, AQ2_RPF_REDIR2_REG,
-		    AQ2_RPF_REDIR2_HASHTYPE, AQ2_RPF_REDIR2_HASHTYPE_ALL);
-	}
-
-	if (sc->sc_rss_enable) {
-		/* RSS Ring selection */
-		switch (sc->sc_nqueues) {
-		case 2:
-			AQ_WRITE_REG(sc, RX_FLR_RSS_CONTROL1_REG,
-			    RX_FLR_RSS_CONTROL1_EN | 0x11111111);
-			break;
-		case 4:
-			AQ_WRITE_REG(sc, RX_FLR_RSS_CONTROL1_REG,
-			    RX_FLR_RSS_CONTROL1_EN | 0x22222222);
-			break;
-		case 8:
-			AQ_WRITE_REG(sc, RX_FLR_RSS_CONTROL1_REG,
-			    RX_FLR_RSS_CONTROL1_EN | 0x33333333);
-			break;
-		}
-	} else {
-		/* disable RSS */
-		AQ_WRITE_REG(sc, RX_FLR_RSS_CONTROL1_REG, 0);
-	}
-
-	if (HWTYPE_AQ1_P(sc)) {
-		/* multicast filter */
-		for (i = 0; i < 32; i++) {
-			AQ_WRITE_REG_BIT(sc, RPF_ETHERTYPE_FILTER_REG(i),
-			   RPF_ETHERTYPE_FILTER_EN, 0);
-		}
-	}
-
-	/* L2 and Multicast filters */
-	for (i = 0; i < AQ_HW_MAC_NUM(sc); i++) {
-		AQ_WRITE_REG_BIT(sc, RPF_L2UC_MSW_REG(i), RPF_L2UC_MSW_EN, 0);
-		AQ_WRITE_REG_BIT(sc, RPF_L2UC_MSW_REG(i), RPF_L2UC_MSW_ACTION,
-		    RPF_ACTION_HOST);
-	}
-	AQ_WRITE_REG(sc, RPF_MCAST_FILTER_MASK_REG, 0);
-	AQ_WRITE_REG(sc, RPF_MCAST_FILTER_REG(0), 0x00010fff);
-
-	/* Vlan filters */
-	AQ_WRITE_REG_BIT(sc, RPF_VLAN_TPID_REG, RPF_VLAN_TPID_OUTER,
-	    ETHERTYPE_QINQ);
-	AQ_WRITE_REG_BIT(sc, RPF_VLAN_TPID_REG, RPF_VLAN_TPID_INNER,
-	    ETHERTYPE_VLAN);
-	AQ_WRITE_REG_BIT(sc, RPF_VLAN_MODE_REG, RPF_VLAN_MODE_PROMISC, 0);
-
-	if ((sc->sc_features & FEATURES_AQ1_REV_B) || HWTYPE_AQ2_P(sc)) {
-		AQ_WRITE_REG_BIT(sc, RPF_VLAN_MODE_REG,
-		    RPF_VLAN_MODE_ACCEPT_UNTAGGED, 1);
-		AQ_WRITE_REG_BIT(sc, RPF_VLAN_MODE_REG,
-		    RPF_VLAN_MODE_UNTAGGED_ACTION, RPF_ACTION_HOST);
-	}
-
-	if (HWTYPE_AQ2_P(sc)) {
-		aq2_init_filter(sc);
-	}
-
-	AQ_WRITE_REG_BIT(sc, RX_DMA_INT_DESC_WRWB_EN_REG,
-	    RX_DMA_INT_DESC_WRWB_EN, 1);
-
-	if (HWTYPE_AQ1_P(sc)) {
-		if (sc->sc_features & FEATURES_RPF2) {
-			AQ_WRITE_REG(sc, RX_TCP_RSS_HASH_REG,
-			    RX_TCP_RSS_HASH_RPF2);
-		} else {
-			AQ_WRITE_REG(sc, RX_TCP_RSS_HASH_REG, 0);
-		}
-		/*
-		 * XXX: RX_TCP_RSS_HASH_REG:
-		 *  linux   set 0x000f0000
-		 *  freebsd set 0x000f001e
-		 */
-		/* RSS hash type set for IP/TCP */
-		AQ_WRITE_REG_BIT(sc, RX_TCP_RSS_HASH_REG,
-		    RX_TCP_RSS_HASH_TYPE, 0x001e);
-	}
-
-	AQ_WRITE_REG_BIT(sc, RPF_L2BC_REG, RPF_L2BC_EN, 1);
-	AQ_WRITE_REG_BIT(sc, RPF_L2BC_REG, RPF_L2BC_ACTION, RPF_ACTION_HOST);
-	AQ_WRITE_REG_BIT(sc, RPF_L2BC_REG, RPF_L2BC_THRESHOLD, 0xffff);
-
-	AQ_WRITE_REG_BIT(sc, RX_DMA_DCA_REG, RX_DMA_DCA_EN, 0);
-	AQ_WRITE_REG_BIT(sc, RX_DMA_DCA_REG, RX_DMA_DCA_MODE, 0);
-}
-
-static void
-aq_hw_interrupt_moderation_set(struct aq_softc *sc)
-{
-	uint32_t v;
-	int i;
-
-	if (sc->sc_intr_moderation_enable) {
-		unsigned int tx_min, rx_min;	/* 0-255 */
-		unsigned int tx_max, rx_max;	/* 0-511? */
-
-		switch (sc->sc_link_rate) {
-		case AQ_LINK_10M:
-		case AQ_LINK_100M:
-			tx_min = 0x4f;
-			tx_max = 0xff;
-			rx_min = 0x04;
-			rx_max = 0x50;
-			break;
-		case AQ_LINK_1G:
-		default:
-			tx_min = 0x4f;
-			tx_max = 0xff;
-			rx_min = 0x30;
-			rx_max = 0x80;
-			break;
-		case AQ_LINK_2G5:
-			tx_min = 0x4f;
-			tx_max = 0xff;
-			rx_min = 0x18;
-			rx_max = 0xe0;
-			break;
-		case AQ_LINK_5G:
-			tx_min = 0x4f;
-			tx_max = 0xff;
-			rx_min = 0x0c;
-			rx_max = 0x70;
-			break;
-		case AQ_LINK_10G:
-			tx_min = 0x4f;
-			tx_max = 0x1ff;
-			rx_min = 0x06;	/* freebsd use 80 */
-			rx_max = 0x38;	/* freebsd use 120 */
-			break;
-		}
-
-		AQ_WRITE_REG_BIT(sc, TX_DMA_INT_DESC_WRWB_EN_REG,
-		    TX_DMA_INT_DESC_WRWB_EN, 0);
-		AQ_WRITE_REG_BIT(sc, TX_DMA_INT_DESC_WRWB_EN_REG,
-		    TX_DMA_INT_DESC_MODERATE_EN, 1);
-		AQ_WRITE_REG_BIT(sc, RX_DMA_INT_DESC_WRWB_EN_REG,
-		    RX_DMA_INT_DESC_WRWB_EN, 0);
-		AQ_WRITE_REG_BIT(sc, RX_DMA_INT_DESC_WRWB_EN_REG,
-		    RX_DMA_INT_DESC_MODERATE_EN, 1);
-
-		if (HWTYPE_AQ2_P(sc)) {
-			v = __SHIFTIN(tx_min, AQ2_TX_INTR_MODERATION_CTL_MIN) |
-			    __SHIFTIN(tx_max, AQ2_TX_INTR_MODERATION_CTL_MAX) |
-			    AQ2_TX_INTR_MODERATION_CTL_EN;
-			for (i = 0; i < AQ_RINGS_NUM; i++) {
-				AQ_WRITE_REG(sc,
-				    AQ2_TX_INTR_MODERATION_CTL_REG(i), v);
-			}
-		} else {
-			v = __SHIFTIN(tx_min, TX_INTR_MODERATION_CTL_MIN) |
-			    __SHIFTIN(tx_max, TX_INTR_MODERATION_CTL_MAX) |
-			    TX_INTR_MODERATION_CTL_EN;
-			for (i = 0; i < AQ_RINGS_NUM; i++) {
-				AQ_WRITE_REG(sc,
-				    TX_INTR_MODERATION_CTL_REG(i), v);
-			}
-		}
-
-		for (i = 0; i < AQ_RINGS_NUM; i++) {
-			AQ_WRITE_REG(sc, RX_INTR_MODERATION_CTL_REG(i),
-			    __SHIFTIN(rx_min, RX_INTR_MODERATION_CTL_MIN) |
-			    __SHIFTIN(rx_max, RX_INTR_MODERATION_CTL_MAX) |
-			    RX_INTR_MODERATION_CTL_EN);
-		}
-
-	} else {
-		AQ_WRITE_REG_BIT(sc, TX_DMA_INT_DESC_WRWB_EN_REG,
-		    TX_DMA_INT_DESC_WRWB_EN, 1);
-		AQ_WRITE_REG_BIT(sc, TX_DMA_INT_DESC_WRWB_EN_REG,
-		    TX_DMA_INT_DESC_MODERATE_EN, 0);
-		AQ_WRITE_REG_BIT(sc, RX_DMA_INT_DESC_WRWB_EN_REG,
-		    RX_DMA_INT_DESC_WRWB_EN, 1);
-		AQ_WRITE_REG_BIT(sc, RX_DMA_INT_DESC_WRWB_EN_REG,
-		    RX_DMA_INT_DESC_MODERATE_EN, 0);
-
-		if (HWTYPE_AQ2_P(sc)) {
-			for (i = 0; i < AQ_RINGS_NUM; i++) {
-				AQ_WRITE_REG(sc,
-				    AQ2_TX_INTR_MODERATION_CTL_REG(i), 0);
-			}
-		} else {
-			for (i = 0; i < AQ_RINGS_NUM; i++) {
-				AQ_WRITE_REG(sc,
-				    TX_INTR_MODERATION_CTL_REG(i), 0);
-			}
-		}
-
-		for (i = 0; i < AQ_RINGS_NUM; i++) {
-			AQ_WRITE_REG(sc, RX_INTR_MODERATION_CTL_REG(i), 0);
-		}
-	}
-}
-
-static void
-aq_hw_qos_set(struct aq_softc *sc)
-{
-	uint32_t tc, tx_bufsize, rx_bufsize;
-
-	/* TPS Descriptor rate init */
-	AQ_WRITE_REG_BIT(sc, TPS_DESC_RATE_REG, TPS_DESC_RATE_TA_RST, 0);
-	AQ_WRITE_REG_BIT(sc, TPS_DESC_RATE_REG, TPS_DESC_RATE_LIM, 0xa);
-
-	/* TPS VM init */
-	AQ_WRITE_REG_BIT(sc, TPS_DESC_VM_ARB_MODE_REG, TPS_DESC_VM_ARB_MODE, 0);
-
-	/* TPS TC credits init */
-	AQ_WRITE_REG_BIT(sc, TPS_DESC_TC_ARB_MODE_REG, TPS_DESC_TC_ARB_MODE, 0);
-	AQ_WRITE_REG_BIT(sc, TPS_DATA_TC_ARB_MODE_REG, TPS_DATA_TC_ARB_MODE, 0);
-
-	if (HWTYPE_AQ1_P(sc)) {
-		tx_bufsize = AQ1_HW_TXBUF_MAX / sc->sc_tcs;
-		rx_bufsize = AQ1_HW_RXBUF_MAX / sc->sc_tcs;
-	} else {
-		tx_bufsize = AQ2_HW_TXBUF_MAX / sc->sc_tcs;
-		rx_bufsize = AQ2_HW_RXBUF_MAX / sc->sc_tcs;
-	}
-
-	for (tc = 0; tc < sc->sc_tcs; tc++) {
-		AQ_WRITE_REG_BIT(sc, TPS_DATA_TCT_REG(tc),
-		    TPS_DATA_TCT_CREDIT_MAX, 0xfff);
-		AQ_WRITE_REG_BIT(sc, TPS_DATA_TCT_REG(tc),
-		    TPS_DATA_TCT_WEIGHT, 0x64);
-		AQ_WRITE_REG_BIT(sc, TPS_DESC_TCT_REG(tc),
-		    TPS_DESC_TCT_CREDIT_MAX, 0x50);
-		AQ_WRITE_REG_BIT(sc, TPS_DESC_TCT_REG(tc),
-		    TPS_DESC_TCT_WEIGHT, 0x1e);
-
-		/* Tx buf size */
-		AQ_WRITE_REG_BIT(sc, TPB_TXB_BUFSIZE_REG(tc), TPB_TXB_BUFSIZE,
-		    tx_bufsize);
-		AQ_WRITE_REG_BIT(sc, TPB_TXB_THRESH_REG(tc), TPB_TXB_THRESH_HI,
-		    (tx_bufsize * (1024 / 32) * 66) / 100);
-		AQ_WRITE_REG_BIT(sc, TPB_TXB_THRESH_REG(tc), TPB_TXB_THRESH_LO,
-		    (tx_bufsize * (1024 / 32) * 50) / 100);
-
-		/* QoS Rx buf size per TC */
-		AQ_WRITE_REG_BIT(sc, RPB_RXB_XOFF_REG(tc), RPB_RXB_XOFF_EN, 0);
-		AQ_WRITE_REG_BIT(sc, RPB_RXB_BUFSIZE_REG(tc), RPB_RXB_BUFSIZE,
-		    rx_bufsize);
-		AQ_WRITE_REG_BIT(sc, RPB_RXB_XOFF_REG(tc),
-		    RPB_RXB_XOFF_THRESH_HI,
-		    (rx_bufsize * (1024 / 32) * 66) / 100);
-		AQ_WRITE_REG_BIT(sc, RPB_RXB_XOFF_REG(tc),
-		    RPB_RXB_XOFF_THRESH_LO,
-		    (rx_bufsize * (1024 / 32) * 50) / 100);
-	}
-
-	/* QoS 802.1p priority -> TC mapping */
-	for (int pri = 0; pri < 8; pri++) {
-		AQ_WRITE_REG_BIT(sc, RPF_RPB_RX_TC_UPT_REG,
-		    RPF_RPB_RX_TC_UPT_MASK(pri), sc->sc_tcs * pri / 8);
-	}
-
-	/* ring to TC mapping */
-	if (HWTYPE_AQ2_P(sc)) {
-		AQ_WRITE_REG_BIT(sc, TPB_TX_BUF_REG,
-		    TPB_TX_BUF_TC_Q_RAND_MAP_EN, 1);
-		switch (sc->sc_tc_mode) {
-		case 4:
-			AQ_WRITE_REG(sc, AQ2_TX_Q_TC_MAP_REG(0), 0x00000000);
-			AQ_WRITE_REG(sc, AQ2_TX_Q_TC_MAP_REG(1), 0x00000000);
-			AQ_WRITE_REG(sc, AQ2_TX_Q_TC_MAP_REG(2), 0x01010101);
-			AQ_WRITE_REG(sc, AQ2_TX_Q_TC_MAP_REG(3), 0x01010101);
-			AQ_WRITE_REG(sc, AQ2_TX_Q_TC_MAP_REG(4), 0x02020202);
-			AQ_WRITE_REG(sc, AQ2_TX_Q_TC_MAP_REG(5), 0x02020202);
-			AQ_WRITE_REG(sc, AQ2_TX_Q_TC_MAP_REG(6), 0x03030303);
-			AQ_WRITE_REG(sc, AQ2_TX_Q_TC_MAP_REG(7), 0x03030303);
-
-			AQ_WRITE_REG(sc, AQ2_RX_Q_TC_MAP_REG(0), 0x00000000);
-			AQ_WRITE_REG(sc, AQ2_RX_Q_TC_MAP_REG(1), 0x11111111);
-			AQ_WRITE_REG(sc, AQ2_RX_Q_TC_MAP_REG(2), 0x22222222);
-			AQ_WRITE_REG(sc, AQ2_RX_Q_TC_MAP_REG(3), 0x33333333);
-			break;
-		case 8:
-			AQ_WRITE_REG(sc, AQ2_TX_Q_TC_MAP_REG(0), 0x00000000);
-			AQ_WRITE_REG(sc, AQ2_TX_Q_TC_MAP_REG(1), 0x01010101);
-			AQ_WRITE_REG(sc, AQ2_TX_Q_TC_MAP_REG(2), 0x02020202);
-			AQ_WRITE_REG(sc, AQ2_TX_Q_TC_MAP_REG(3), 0x03030303);
-			AQ_WRITE_REG(sc, AQ2_TX_Q_TC_MAP_REG(4), 0x04040404);
-			AQ_WRITE_REG(sc, AQ2_TX_Q_TC_MAP_REG(5), 0x05050505);
-			AQ_WRITE_REG(sc, AQ2_TX_Q_TC_MAP_REG(6), 0x06060606);
-			AQ_WRITE_REG(sc, AQ2_TX_Q_TC_MAP_REG(7), 0x07070707);
-
-			AQ_WRITE_REG(sc, AQ2_RX_Q_TC_MAP_REG(0), 0x11110000);
-			AQ_WRITE_REG(sc, AQ2_RX_Q_TC_MAP_REG(1), 0x33332222);
-			AQ_WRITE_REG(sc, AQ2_RX_Q_TC_MAP_REG(2), 0x55554444);
-			AQ_WRITE_REG(sc, AQ2_RX_Q_TC_MAP_REG(3), 0x77776666);
-			break;
-		}
-	}
-}
-
-static int
-aq_init_rss(struct aq_softc *sc)
-{
-	CTASSERT(AQ_RSS_HASHKEY_SIZE == RSS_KEYSIZE);
-	uint32_t rss_key[RSS_KEYSIZE / sizeof(uint32_t)];
-	uint8_t rss_table[AQ_RSS_INDIRECTION_TABLE_MAX];
-	unsigned int i;
-	int error;
-
-	if (HWTYPE_AQ2_P(sc)) {
-		uint32_t q_per_tc = (sc->sc_tc_mode == 8) ? 4 : 8;
-		uint32_t tc;
-
-		AQ_WRITE_REG_BIT(sc, AQ2_RPF_REDIR2_REG,
-		    AQ2_RPF_REDIR2_INDEX, (sc->sc_tc_mode == 8) ? 1 : 0);
-		for (i = 0; i < AQ_RSS_INDIRECTION_TABLE_MAX; i++) {
-			for (tc = 0; tc < sc->sc_tc_mode; tc++) {
-				uint32_t q = tc * q_per_tc + (i % sc->sc_nqueues);
-				AQ_WRITE_REG_BIT(sc, AQ2_RPF_RSS_REDIR_REG(tc, i),
-				    AQ2_RPF_RSS_REDIR_TC_MASK(tc), q);
-			}
-		}
-	}
-
-	/* initialize rss key */
-	rss_getkey((uint8_t *)rss_key);
-
-	/* hash to ring table */
-	for (i = 0; i < AQ_RSS_INDIRECTION_TABLE_MAX; i++) {
-		rss_table[i] = i % sc->sc_nqueues;
-	}
-
-	/*
-	 * set rss key
-	 */
-	for (i = 0; i < __arraycount(rss_key); i++) {
-		uint32_t key_data = sc->sc_rss_enable ? ntohl(rss_key[i]) : 0;
-		AQ_WRITE_REG(sc, RPF_RSS_KEY_WR_DATA_REG, key_data);
-		AQ_WRITE_REG_BIT(sc, RPF_RSS_KEY_ADDR_REG,
-		    RPF_RSS_KEY_ADDR, __arraycount(rss_key) - 1 - i);
-		AQ_WRITE_REG_BIT(sc, RPF_RSS_KEY_ADDR_REG,
-		    RPF_RSS_KEY_WR_EN, 1);
-		WAIT_FOR(AQ_READ_REG_BIT(sc, RPF_RSS_KEY_ADDR_REG,
-		    RPF_RSS_KEY_WR_EN) == 0, 1000, 10, &error);
-		if (error != 0) {
-			device_printf(sc->sc_dev, "%s: rss key write timeout\n",
-			    __func__);
-			goto rss_set_timeout;
-		}
-	}
-
-	/*
-	 * set rss indirection table
-	 *
-	 * AQ's rss redirect table is consist of 3bit*64 (192bit) packed array.
-	 * we'll make it by __BITMAP(3) macros.
-	 */
-	__BITMAP_TYPE(, uint16_t, 3 * AQ_RSS_INDIRECTION_TABLE_MAX) bit3x64;
-	__BITMAP_ZERO(&bit3x64);
-
-#define AQ_3BIT_PACKED_ARRAY_SET(bitmap, idx, val)		\
-	do {							\
-		if (val & 1) {					\
-			__BITMAP_SET((idx) * 3, (bitmap));	\
-		} else {					\
-			__BITMAP_CLR((idx) * 3, (bitmap));	\
-		}						\
-		if (val & 2) {					\
-			__BITMAP_SET((idx) * 3 + 1, (bitmap));	\
-		} else {					\
-			__BITMAP_CLR((idx) * 3 + 1, (bitmap));	\
-		}						\
-		if (val & 4) {					\
-			__BITMAP_SET((idx) * 3 + 2, (bitmap));	\
-		} else {					\
-			__BITMAP_CLR((idx) * 3 + 2, (bitmap));	\
-		}						\
-	} while (0 /* CONSTCOND */)
-
-	for (i = 0; i < AQ_RSS_INDIRECTION_TABLE_MAX; i++) {
-		AQ_3BIT_PACKED_ARRAY_SET(&bit3x64, i, rss_table[i]);
-	}
-
-	/* write 192bit data in steps of 16bit */
-	for (i = 0; i < (int)__arraycount(bit3x64._b); i++) {
-		AQ_WRITE_REG_BIT(sc, RPF_RSS_REDIR_WR_DATA_REG,
-		    RPF_RSS_REDIR_WR_DATA, bit3x64._b[i]);
-		AQ_WRITE_REG_BIT(sc, RPF_RSS_REDIR_ADDR_REG,
-		    RPF_RSS_REDIR_ADDR, i);
-		AQ_WRITE_REG_BIT(sc, RPF_RSS_REDIR_ADDR_REG,
-		    RPF_RSS_REDIR_WR_EN, 1);
-
-		WAIT_FOR(AQ_READ_REG_BIT(sc, RPF_RSS_REDIR_ADDR_REG,
-		    RPF_RSS_REDIR_WR_EN) == 0, 1000, 10, &error);
-		if (error != 0)
-			break;
-	}
-
- rss_set_timeout:
-	return error;
-}
-
-static void
-aq1_hw_l3_filter_set(struct aq_softc *sc)
-{
-	int i;
-
-	/* clear all filter */
-	for (i = 0; i < 8; i++) {
-		AQ_WRITE_REG_BIT(sc, RPF_L3_FILTER_REG(i),
-		    RPF_L3_FILTER_L4_EN, 0);
-	}
-}
-
-static void
-aq_set_vlan_filters(struct aq_softc *sc)
-{
-	struct ethercom * const ec = &sc->sc_ethercom;
-	struct ifnet * const ifp = &sc->sc_ethercom.ec_if;
-	struct vlanid_list *vlanidp;
-	int i;
-
-	ETHER_LOCK(ec);
-
-	/* disable all vlan filters */
-	for (i = 0; i < RPF_VLAN_MAX_FILTERS; i++) {
-		AQ_WRITE_REG(sc, RPF_VLAN_FILTER_REG(i), 0);
-		if (HWTYPE_AQ2_P(sc)) {
-			aq2_filter_art_set(sc, AQ2_RPF_INDEX_VLAN_USER + i,
-			    0, 0, AQ2_ART_ACTION_DISABLE);
-			AQ_WRITE_REG_BIT(sc, RPF_VLAN_FILTER_REG(i),
-			    RPF_VLAN_FILTER_TAG, 1);
-		}
-	}
-
-	/* count VID */
-	i = 0;
-	SIMPLEQ_FOREACH(vlanidp, &ec->ec_vids, vid_list)
-		i++;
-
-	if (((sc->sc_ethercom.ec_capenable & ETHERCAP_VLAN_HWFILTER) == 0) ||
-	    (ifp->if_flags & IFF_PROMISC) ||
-	    (i > RPF_VLAN_MAX_FILTERS)) {
-		/*
-		 * no vlan hwfilter, in promiscuous mode, or too many VID?
-		 * must receive all VID
-		 */
-		AQ_WRITE_REG_BIT(sc, RPF_VLAN_MODE_REG,
-		    RPF_VLAN_MODE_PROMISC, 1);
-		goto done;
-	}
-
-	/* receive only selected VID */
-	AQ_WRITE_REG_BIT(sc, RPF_VLAN_MODE_REG, RPF_VLAN_MODE_PROMISC, 0);
-	i = 0;
-	SIMPLEQ_FOREACH(vlanidp, &ec->ec_vids, vid_list) {
-		AQ_WRITE_REG_BIT(sc, RPF_VLAN_FILTER_REG(i),
-		    RPF_VLAN_FILTER_EN, 1);
-		AQ_WRITE_REG_BIT(sc, RPF_VLAN_FILTER_REG(i),
-		    RPF_VLAN_FILTER_RXQ_EN, 0);
-		AQ_WRITE_REG_BIT(sc, RPF_VLAN_FILTER_REG(i),
-		    RPF_VLAN_FILTER_RXQ, 0);
-		AQ_WRITE_REG_BIT(sc, RPF_VLAN_FILTER_REG(i),
-		    RPF_VLAN_FILTER_ACTION, RPF_ACTION_HOST);
-		AQ_WRITE_REG_BIT(sc, RPF_VLAN_FILTER_REG(i),
-		    RPF_VLAN_FILTER_ID, vlanidp->vid);
-
-		if (HWTYPE_AQ2_P(sc)) {
-			/*
-			 * If you want to fix the ring (CPU) for each VLAN ID,
-			 * Use AQ2_ART_ACTION_ASSIGN_QUEUE(i % sc->sc_nqueues)
-			 * instead of AQ2_ART_ACTION_ASSIGN_TC().
-			 */
-			uint32_t action =
-			    AQ2_ART_ACTION_ASSIGN_TC(i % sc->sc_nqueues);
-
-			AQ_WRITE_REG_BIT(sc, RPF_VLAN_FILTER_REG(i),
-			    RPF_VLAN_FILTER_TAG, i + 2);
-			aq2_filter_art_set(sc, AQ2_RPF_INDEX_VLAN_USER + i,
-			    __SHIFTIN(i + 2, AQ2_RPF_TAG_VLAN_MASK),
-			    AQ2_RPF_TAG_VLAN_MASK, action);
-		}
-		i++;
-	}
-
- done:
-	ETHER_UNLOCK(ec);
-}
-
-static int
-aq_hw_init(struct aq_softc *sc)
-{
-	uint32_t v;
-
-	if (HWTYPE_AQ1_P(sc)) {
-		/* Force limit MRRS on RDM/TDM to 2K */
-		v = AQ_READ_REG(sc, AQ_PCI_REG_CONTROL_6_REG);
-		AQ_WRITE_REG(sc, AQ_PCI_REG_CONTROL_6_REG,
-		    (v & ~0x0707) | 0x0404);
-
-		/*
-		 * TX DMA total request limit. B0 hardware is not capable to
-		 * handle more than (8K-MRRS) incoming DMA data.
-		 * Value 24 in 256byte units
-		 */
-		AQ_WRITE_REG(sc, AQ_HW_TX_DMA_TOTAL_REQ_LIMIT_REG, 24);
-	}
-
-	if (HWTYPE_AQ2_P(sc)) {
-		uint32_t fpgaver, speed;
-		fpgaver = AQ_READ_REG(sc, AQ2_HW_FPGA_VERSION_REG);
-		if (fpgaver < 0x01000000)
-			speed = AQ2_LAUNCHTIME_CTRL_RATIO_SPEED_FULL;
-		else if (fpgaver >= 0x01008502)
-			speed = AQ2_LAUNCHTIME_CTRL_RATIO_SPEED_HALF;
-		else
-			speed = AQ2_LAUNCHTIME_CTRL_RATIO_SPEED_QUATER;
-		AQ_WRITE_REG_BIT(sc, AQ2_LAUNCHTIME_CTRL_REG,
-		    AQ2_LAUNCHTIME_CTRL_RATIO, speed);
-	}
-
-	aq_hw_init_tx_path(sc);
-	aq_hw_init_rx_path(sc);
-
-	aq_hw_interrupt_moderation_set(sc);
-
-	aq_set_mac_addr(sc, AQ_HW_MAC_OWN, sc->sc_enaddr.ether_addr_octet);
-	aq_set_linkmode(sc, AQ_LINK_NONE, AQ_FC_NONE, AQ_EEE_DISABLE);
-
-	aq_hw_qos_set(sc);
-
-	if (HWTYPE_AQ2_P(sc)) {
-		AQ_WRITE_REG_BIT(sc, AQ2_RPF_NEW_CTRL_REG,
-		    AQ2_RPF_NEW_CTRL_ENABLE, 1);
-	}
-
-	/* Enable interrupt */
-	int irqmode;
-	if (sc->sc_msix)
-		irqmode =  AQ_INTR_CTRL_IRQMODE_MSIX;
-	else
-		irqmode =  AQ_INTR_CTRL_IRQMODE_MSI;
-
-	AQ_WRITE_REG(sc, AQ_INTR_CTRL_REG, AQ_INTR_CTRL_RESET_DIS);
-	AQ_WRITE_REG_BIT(sc, AQ_INTR_CTRL_REG, AQ_INTR_CTRL_MULTIVEC,
-	    sc->sc_msix ? 1 : 0);
-	AQ_WRITE_REG_BIT(sc, AQ_INTR_CTRL_REG, AQ_INTR_CTRL_IRQMODE, irqmode);
-
-	AQ_WRITE_REG(sc, AQ_INTR_AUTOMASK_REG, 0xffffffff);
-
-	AQ_WRITE_REG(sc, AQ_GEN_INTR_MAP_REG(0),
-	    ((AQ_B0_ERR_INT << 24) | (1 << 31)) |
-	    ((AQ_B0_ERR_INT << 16) | (1 << 23))
-	);
-
-	/* link interrupt */
-	if (!sc->sc_msix)
-		sc->sc_linkstat_irq = AQ_LINKSTAT_IRQ;
-	AQ_WRITE_REG(sc, AQ_GEN_INTR_MAP_REG(3),
-	    __BIT(7) | sc->sc_linkstat_irq);
-
-	return 0;
-}
-
-static int
+void
 aq_update_link_status(struct aq_softc *sc)
 {
-	struct ifnet * const ifp = &sc->sc_ethercom.ec_if;
-	aq_link_speed_t rate = AQ_LINK_NONE;
-	aq_link_fc_t fc = AQ_FC_NONE;
-	aq_link_eee_t eee = AQ_EEE_DISABLE;
-	unsigned int speed;
-	int changed = 0;
+	struct ifnet *ifp = &sc->sc_arpcom.ac_if;
+	enum aq_link_speed speed;
+	enum aq_link_fc fc;
 
-	aq_get_linkmode(sc, &rate, &fc, &eee);
-
-	if (sc->sc_link_rate != rate)
-		changed = 1;
-	if (sc->sc_link_fc != fc)
-		changed = 1;
-	if (sc->sc_link_eee != eee)
-		changed = 1;
-
-	if (changed) {
-		switch (rate) {
-		case AQ_LINK_10M:
-			speed = 10;
-			break;
-		case AQ_LINK_100M:
-			speed = 100;
-			break;
-		case AQ_LINK_1G:
-			speed = 1000;
-			break;
-		case AQ_LINK_2G5:
-			speed = 2500;
-			break;
-		case AQ_LINK_5G:
-			speed = 5000;
-			break;
-		case AQ_LINK_10G:
-			speed = 10000;
-			break;
-		case AQ_LINK_NONE:
-		default:
-			speed = 0;
-			break;
-		}
-
-		if (sc->sc_link_rate == AQ_LINK_NONE && rate != AQ_LINK_NONE) {
-			/* link DOWN -> UP */
-			device_printf(sc->sc_dev, "link is UP: speed=%u\n",
-			    speed);
-			if_link_state_change(ifp, LINK_STATE_UP);
-		} else if (rate == AQ_LINK_NONE) {
-			/* link UP -> DOWN */
-			device_printf(sc->sc_dev, "link is DOWN\n");
-			if_link_state_change(ifp, LINK_STATE_DOWN);
-		} else {
-			device_printf(sc->sc_dev,
-			    "link mode changed: speed=%u, fc=0x%x, eee=%x\n",
-			    speed, fc, eee);
-		}
-
-		sc->sc_link_rate = rate;
-		sc->sc_link_fc = fc;
-		sc->sc_link_eee = eee;
-
-		/* update interrupt timing according to new link speed */
-		aq_hw_interrupt_moderation_set(sc);
-	}
-
-	return changed;
-}
-
-#ifdef AQ_EVENT_COUNTERS
-static void
-aq_update_statistics(struct aq_softc *sc)
-{
-	int prev = sc->sc_statistics_idx;
-	int cur = prev ^ 1;
-
-	if (sc->sc_fw_ops->get_stats(sc, &sc->sc_statistics[cur]) != 0)
+	if (aq_get_linkmode(sc, &speed, &fc, NULL) != 0)
 		return;
 
-	/*
-	 * some aq's internal statistics counters are 32bit.
-	 * cauculate delta, and add to evcount
-	 */
-#define ADD_DELTA(cur, prev, name)				\
-	do {							\
-		uint32_t n;					\
-		n = (uint32_t)(sc->sc_statistics[cur].name -	\
-		    sc->sc_statistics[prev].name);		\
-		if (n != 0) {					\
-			AQ_EVCNT_ADD(sc, name, n);		\
-		}						\
-	} while (/*CONSTCOND*/0);
-
-	ADD_DELTA(cur, prev, uprc);
-	ADD_DELTA(cur, prev, mprc);
-	ADD_DELTA(cur, prev, bprc);
-	ADD_DELTA(cur, prev, prc);
-	ADD_DELTA(cur, prev, erpr);
-	ADD_DELTA(cur, prev, uptc);
-	ADD_DELTA(cur, prev, mptc);
-	ADD_DELTA(cur, prev, bptc);
-	ADD_DELTA(cur, prev, ptc);
-	ADD_DELTA(cur, prev, erpt);
-	ADD_DELTA(cur, prev, mbtc);
-	ADD_DELTA(cur, prev, bbtc);
-	ADD_DELTA(cur, prev, mbrc);
-	ADD_DELTA(cur, prev, bbrc);
-	ADD_DELTA(cur, prev, ubrc);
-	ADD_DELTA(cur, prev, ubtc);
-	ADD_DELTA(cur, prev, dpc);
-	ADD_DELTA(cur, prev, cprc);
-
-	sc->sc_statistics_idx = cur;
+	if (speed == AQ_LINK_NONE) {
+		if (ifp->if_link_state != LINK_STATE_DOWN) {
+			ifp->if_link_state = LINK_STATE_DOWN;
+			if_link_state_change(ifp);
+		}
+	} else {
+		if (ifp->if_link_state != LINK_STATE_FULL_DUPLEX) {
+			ifp->if_link_state = LINK_STATE_FULL_DUPLEX;
+			if_link_state_change(ifp);
+		}
+	}
 }
-#endif /* AQ_EVENT_COUNTERS */
 
-/* allocate and map one DMA block */
-static int
-_alloc_dma(struct aq_softc *sc, bus_size_t size, bus_size_t *sizep,
-    void **addrp, bus_dmamap_t *mapp, bus_dma_segment_t *seg)
+int
+aq_rxrinfo(struct aq_softc *sc, struct if_rxrinfo *ifri)
 {
-	int nsegs, error;
+	struct if_rxring_info *ifr;
+	int i;
+	int error;
 
-	if ((error = bus_dmamem_alloc(sc->sc_dmat, size, PAGE_SIZE, 0, seg,
-	    1, &nsegs, 0)) != 0) {
-		aprint_error_dev(sc->sc_dev,
-		    "unable to allocate DMA buffer, error=%d\n", error);
-		goto fail_alloc;
+	ifr = mallocarray(sc->sc_nqueues, sizeof(*ifr), M_TEMP,
+	    M_WAITOK | M_ZERO | M_CANFAIL);
+	if (ifr == NULL)
+		return (ENOMEM);
+
+	for (i = 0; i < sc->sc_nqueues; i++) {
+		ifr[i].ifr_size = MCLBYTES;
+		ifr[i].ifr_info = sc->sc_queues[i].q_rx.rx_rxr;
 	}
 
-	if ((error = bus_dmamem_map(sc->sc_dmat, seg, 1, size, addrp,
-	    BUS_DMA_COHERENT)) != 0) {
-		aprint_error_dev(sc->sc_dev,
-		    "unable to map DMA buffer, error=%d\n", error);
-		goto fail_map;
+	error = if_rxr_info_ioctl(ifri, sc->sc_nqueues, ifr);
+	free(ifr, M_TEMP, sc->sc_nqueues * sizeof(*ifr));
+
+	return (error);
+}
+
+int
+aq_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
+{
+	struct aq_softc *sc = ifp->if_softc;
+	struct ifreq *ifr = (struct ifreq *)data;
+	int error = 0, s;
+
+	s = splnet();
+
+	switch (cmd) {
+	case SIOCSIFADDR:
+		ifp->if_flags |= IFF_UP;
+		if ((ifp->if_flags & IFF_RUNNING) == 0)
+			error = aq_up(sc);
+		break;
+	case SIOCSIFFLAGS:
+		if (ifp->if_flags & IFF_UP) {
+			if (ifp->if_flags & IFF_RUNNING)
+				error = ENETRESET;
+			else
+				error = aq_up(sc);
+		} else {
+			if (ifp->if_flags & IFF_RUNNING)
+				aq_down(sc);
+		}
+		break;
+	case SIOCSIFMEDIA:
+	case SIOCGIFMEDIA:
+		error = ifmedia_ioctl(ifp, ifr, &sc->sc_media, cmd);
+		break;
+
+	case SIOCGIFRXR:
+		error = aq_rxrinfo(sc, (struct if_rxrinfo *)ifr->ifr_data);
+		break;
+
+	default:
+		error = ether_ioctl(ifp, &sc->sc_arpcom, cmd, data);
 	}
 
-	if ((error = bus_dmamap_create(sc->sc_dmat, size, 1, size, 0,
-	    0, mapp)) != 0) {
-		aprint_error_dev(sc->sc_dev,
-		    "unable to create DMA map, error=%d\n", error);
-		goto fail_create;
+	if (error == ENETRESET) {
+		if (ifp->if_flags & IFF_RUNNING)
+			aq_iff(sc);
+		error = 0;
 	}
 
-	if ((error = bus_dmamap_load(sc->sc_dmat, *mapp, *addrp, size, NULL,
-	    0)) != 0) {
-		aprint_error_dev(sc->sc_dev,
-		    "unable to load DMA map, error=%d\n", error);
-		goto fail_load;
-	}
-
-	*sizep = size;
-	return 0;
-
- fail_load:
-	bus_dmamap_destroy(sc->sc_dmat, *mapp);
-	*mapp = NULL;
- fail_create:
-	bus_dmamem_unmap(sc->sc_dmat, *addrp, size);
-	*addrp = NULL;
- fail_map:
-	bus_dmamem_free(sc->sc_dmat, seg, 1);
-	memset(seg, 0, sizeof(*seg));
- fail_alloc:
-	*sizep = 0;
+	splx(s);
 	return error;
 }
 
-static void
-_free_dma(struct aq_softc *sc, bus_size_t *sizep, void **addrp,
-    bus_dmamap_t *mapp, bus_dma_segment_t *seg)
-{
-	if (*mapp != NULL) {
-		bus_dmamap_destroy(sc->sc_dmat, *mapp);
-		*mapp = NULL;
-	}
-	if (*addrp != NULL) {
-		bus_dmamem_unmap(sc->sc_dmat, *addrp, *sizep);
-		*addrp = NULL;
-	}
-	if (*sizep != 0) {
-		bus_dmamem_free(sc->sc_dmat, seg, 1);
-		memset(seg, 0, sizeof(*seg));
-		*sizep = 0;
-	}
-}
-
-static int
-aq_txring_alloc(struct aq_softc *sc, struct aq_txring *txring)
-{
-	int i, error;
-
-	/* allocate tx descriptors */
-	error = _alloc_dma(sc, sizeof(aq_tx_desc_t) * AQ_TXD_NUM,
-	    &txring->txr_txdesc_size, (void **)&txring->txr_txdesc,
-	    &txring->txr_txdesc_dmamap, txring->txr_txdesc_seg);
-	if (error != 0)
-		return error;
-
-	memset(txring->txr_txdesc, 0, sizeof(aq_tx_desc_t) * AQ_TXD_NUM);
-
-	/* fill tx ring with dmamap */
-	for (i = 0; i < AQ_TXD_NUM; i++) {
-#define AQ_MAXDMASIZE	(16 * 1024)
-#define AQ_NTXSEGS	32
-		/* XXX: TODO: error check */
-		bus_dmamap_create(sc->sc_dmat, AQ_MAXDMASIZE, AQ_NTXSEGS,
-		    AQ_MAXDMASIZE, 0, 0, &txring->txr_mbufs[i].dmamap);
-	}
-	return 0;
-}
-
-static void
-aq_txring_free(struct aq_softc *sc, struct aq_txring *txring)
-{
-	int i;
-
-	_free_dma(sc, &txring->txr_txdesc_size, (void **)&txring->txr_txdesc,
-	    &txring->txr_txdesc_dmamap, txring->txr_txdesc_seg);
-
-	for (i = 0; i < AQ_TXD_NUM; i++) {
-		if (txring->txr_mbufs[i].dmamap != NULL) {
-			if (txring->txr_mbufs[i].m != NULL) {
-				bus_dmamap_unload(sc->sc_dmat,
-				    txring->txr_mbufs[i].dmamap);
-				m_freem(txring->txr_mbufs[i].m);
-				txring->txr_mbufs[i].m = NULL;
-			}
-			bus_dmamap_destroy(sc->sc_dmat,
-			    txring->txr_mbufs[i].dmamap);
-			txring->txr_mbufs[i].dmamap = NULL;
-		}
-	}
-}
-
-static int
-aq_rxring_alloc(struct aq_softc *sc, struct aq_rxring *rxring)
-{
-	int i, error;
-
-	/* allocate rx descriptors */
-	error = _alloc_dma(sc, sizeof(aq_rx_desc_t) * AQ_RXD_NUM,
-	    &rxring->rxr_rxdesc_size, (void **)&rxring->rxr_rxdesc,
-	    &rxring->rxr_rxdesc_dmamap, rxring->rxr_rxdesc_seg);
-	if (error != 0)
-		return error;
-
-	memset(rxring->rxr_rxdesc, 0, sizeof(aq_rx_desc_t) * AQ_RXD_NUM);
-
-	/* fill rxring with dmamaps */
-	for (i = 0; i < AQ_RXD_NUM; i++) {
-		rxring->rxr_mbufs[i].m = NULL;
-		/* XXX: TODO: error check */
-		bus_dmamap_create(sc->sc_dmat, MCLBYTES, 1, MCLBYTES, 0, 0,
-		    &rxring->rxr_mbufs[i].dmamap);
-	}
-	return 0;
-}
-
-static void
-aq_rxdrain(struct aq_softc *sc, struct aq_rxring *rxring)
-{
-	int i;
-
-	/* free all mbufs allocated for RX */
-	for (i = 0; i < AQ_RXD_NUM; i++) {
-		if (rxring->rxr_mbufs[i].m != NULL) {
-			bus_dmamap_unload(sc->sc_dmat,
-			    rxring->rxr_mbufs[i].dmamap);
-			m_freem(rxring->rxr_mbufs[i].m);
-			rxring->rxr_mbufs[i].m = NULL;
-		}
-	}
-}
-
-static void
-aq_rxring_free(struct aq_softc *sc, struct aq_rxring *rxring)
-{
-	int i;
-
-	/* free all mbufs and dmamaps */
-	aq_rxdrain(sc, rxring);
-	for (i = 0; i < AQ_RXD_NUM; i++) {
-		if (rxring->rxr_mbufs[i].dmamap != NULL) {
-			bus_dmamap_destroy(sc->sc_dmat,
-			    rxring->rxr_mbufs[i].dmamap);
-			rxring->rxr_mbufs[i].dmamap = NULL;
-		}
-	}
-
-	/* free RX descriptor */
-	_free_dma(sc, &rxring->rxr_rxdesc_size, (void **)&rxring->rxr_rxdesc,
-	    &rxring->rxr_rxdesc_dmamap, rxring->rxr_rxdesc_seg);
-}
-
-static void
-aq_rxring_setmbuf(struct aq_softc *sc, struct aq_rxring *rxring, int idx,
-    struct mbuf *m)
+int
+aq2_filter_art_set(struct aq_softc *sc, uint32_t idx,
+    uint32_t tag, uint32_t mask, uint32_t action)
 {
 	int error;
 
-	/* if mbuf already exists, unload and free */
-	if (rxring->rxr_mbufs[idx].m != NULL) {
-		bus_dmamap_unload(sc->sc_dmat, rxring->rxr_mbufs[idx].dmamap);
-		m_freem(rxring->rxr_mbufs[idx].m);
-		rxring->rxr_mbufs[idx].m = NULL;
+	AQ_MPI_LOCK(sc);
+
+	WAIT_FOR(AQ_READ_REG(sc, AQ2_ART_SEM_REG) == 1, 10, 1000, &error);
+	if (error != 0) {
+		printf("%s: AQ2_ART_SEM_REG timeout\n", DEVNAME(sc));
+		goto out;
 	}
 
-	rxring->rxr_mbufs[idx].m = m;
+	idx += sc->sc_art_filter_base_index;
+	AQ_WRITE_REG(sc, AQ2_RPF_ACT_ART_REQ_TAG_REG(idx), tag);
+	AQ_WRITE_REG(sc, AQ2_RPF_ACT_ART_REQ_MASK_REG(idx), mask);
+	AQ_WRITE_REG(sc, AQ2_RPF_ACT_ART_REQ_ACTION_REG(idx), action);
 
-	m->m_len = m->m_pkthdr.len = m->m_ext.ext_size;
-	error = bus_dmamap_load_mbuf(sc->sc_dmat, rxring->rxr_mbufs[idx].dmamap,
-	    m, BUS_DMA_READ | BUS_DMA_NOWAIT);
-	if (error) {
-		device_printf(sc->sc_dev,
-		    "unable to load rx DMA map %d, error = %d\n", idx, error);
-		panic("%s: unable to load rx DMA map. error=%d",
-		    __func__, error);
-	}
-	bus_dmamap_sync(sc->sc_dmat, rxring->rxr_mbufs[idx].dmamap, 0,
-	    rxring->rxr_mbufs[idx].dmamap->dm_mapsize, BUS_DMASYNC_PREREAD);
-}
+	AQ_WRITE_REG(sc, AQ2_ART_SEM_REG, 1);
 
-static inline void
-aq_rxring_reset_desc(struct aq_softc *sc, struct aq_rxring *rxring, int idx)
-{
-	/* refill rxdesc, and sync */
-	rxring->rxr_rxdesc[idx].read.buf_addr =
-	   htole64(rxring->rxr_mbufs[idx].dmamap->dm_segs[0].ds_addr);
-	rxring->rxr_rxdesc[idx].read.hdr_addr = 0;
-	bus_dmamap_sync(sc->sc_dmat, rxring->rxr_rxdesc_dmamap,
-	    sizeof(aq_rx_desc_t) * idx, sizeof(aq_rx_desc_t),
-	    BUS_DMASYNC_PREWRITE);
-}
-
-static struct mbuf *
-aq_alloc_mbuf(void)
-{
-	struct mbuf *m;
-
-	MGETHDR(m, M_DONTWAIT, MT_DATA);
-	if (m == NULL)
-		return NULL;
-
-	MCLGET(m, M_DONTWAIT);
-	if ((m->m_flags & M_EXT) == 0) {
-		m_freem(m);
-		return NULL;
-	}
-
-	return m;
-}
-
-/* allocate mbuf and unload dmamap */
-static int
-aq_rxring_add(struct aq_softc *sc, struct aq_rxring *rxring, int idx)
-{
-	struct mbuf *m;
-
-	m = aq_alloc_mbuf();
-	if (m == NULL)
-		return ENOBUFS;
-
-	aq_rxring_setmbuf(sc, rxring, idx, m);
-	return 0;
-}
-
-static int
-aq_txrx_rings_alloc(struct aq_softc *sc)
-{
-	int n, error;
-
-	for (n = 0; n < sc->sc_nqueues; n++) {
-		sc->sc_queue[n].sc = sc;
-		sc->sc_queue[n].txring.txr_sc = sc;
-		sc->sc_queue[n].txring.txr_index = n;
-		mutex_init(&sc->sc_queue[n].txring.txr_mutex, MUTEX_DEFAULT,
-		    IPL_NET);
-		error = aq_txring_alloc(sc, &sc->sc_queue[n].txring);
-		if (error != 0)
-			goto failure;
-
-		error = aq_tx_pcq_alloc(sc, &sc->sc_queue[n].txring);
-		if (error != 0)
-			goto failure;
-
-		sc->sc_queue[n].rxring.rxr_sc = sc;
-		sc->sc_queue[n].rxring.rxr_index = n;
-		mutex_init(&sc->sc_queue[n].rxring.rxr_mutex, MUTEX_DEFAULT,
-		   IPL_NET);
-		error = aq_rxring_alloc(sc, &sc->sc_queue[n].rxring);
-		if (error != 0)
-			break;
-	}
-
- failure:
+ out:
+	AQ_MPI_UNLOCK(sc);
 	return error;
 }
 
-static void
-aq_txrx_rings_free(struct aq_softc *sc)
+void
+aq_iff(struct aq_softc *sc)
 {
-	int n;
+	struct ifnet *ifp = &sc->sc_arpcom.ac_if;
+	struct arpcom *ac = &sc->sc_arpcom;
+	struct ether_multi *enm;
+	struct ether_multistep step;
+	uint32_t action;
+	int idx;
 
-	for (n = 0; n < sc->sc_nqueues; n++) {
-		aq_txring_free(sc, &sc->sc_queue[n].txring);
-		mutex_destroy(&sc->sc_queue[n].txring.txr_mutex);
-
-		aq_tx_pcq_free(sc, &sc->sc_queue[n].txring);
-
-		aq_rxring_free(sc, &sc->sc_queue[n].rxring);
-		mutex_destroy(&sc->sc_queue[n].rxring.rxr_mutex);
-	}
-}
-
-static int
-aq_tx_pcq_alloc(struct aq_softc *sc, struct aq_txring *txring)
-{
-	int error = 0;
-	txring->txr_softint = NULL;
-
-	txring->txr_pcq = pcq_create(AQ_TXD_NUM, KM_NOSLEEP);
-	if (txring->txr_pcq == NULL) {
-		aprint_error_dev(sc->sc_dev,
-		    "unable to allocate pcq for TXring[%d]\n",
-		    txring->txr_index);
-		error = ENOMEM;
-		goto done;
+	if (HWTYPE_AQ2_P(sc)) {
+		action = (ifp->if_flags & IFF_PROMISC) ?
+		    AQ2_ART_ACTION_DISABLE : AQ2_ART_ACTION_DROP;
+		aq2_filter_art_set(sc, AQ2_RPF_INDEX_L2_PROMISC_OFF, 0,
+		    AQ2_RPF_TAG_UC_MASK | AQ2_RPF_TAG_ALLMC_MASK, action);
+		aq2_filter_art_set(sc, AQ2_RPF_INDEX_VLAN_PROMISC_OFF, 0,
+		    AQ2_RPF_TAG_VLAN_MASK | AQ2_RPF_TAG_UNTAG_MASK, action);
 	}
 
-	txring->txr_softint = softint_establish(SOFTINT_NET | SOFTINT_MPSAFE,
-	    aq_deferred_transmit, txring);
-	if (txring->txr_softint == NULL) {
-		aprint_error_dev(sc->sc_dev,
-		    "unable to establish softint for TXring[%d]\n",
-		    txring->txr_index);
-		error = ENOENT;
-	}
-
- done:
-	return error;
-}
-
-static void
-aq_tx_pcq_free(struct aq_softc *sc, struct aq_txring *txring)
-{
-	struct mbuf *m;
-
-	if (txring->txr_softint != NULL) {
-		softint_disestablish(txring->txr_softint);
-		txring->txr_softint = NULL;
-	}
-
-	if (txring->txr_pcq != NULL) {
-		while ((m = pcq_get(txring->txr_pcq)) != NULL)
-			m_freem(m);
-		pcq_destroy(txring->txr_pcq);
-		txring->txr_pcq = NULL;
-	}
-}
-
-// #if NSYSMON_ENVSYS > 0
-// static void
-// aq_temp_refresh(struct sysmon_envsys *sme, envsys_data_t *edata)
-// {
-// 	struct aq_softc *sc;
-// 	uint32_t temp;
-// 	int error;
-
-// 	sc = sme->sme_cookie;
-
-// 	error = sc->sc_fw_ops->get_temperature(sc, &temp);
-// 	if (error == 0) {
-// 		edata->value_cur = temp;
-// 		edata->state = ENVSYS_SVALID;
-// 	} else {
-// 		edata->state = ENVSYS_SINVALID;
-// 	}
-// }
-// #endif
-
-
-
-static bool
-aq_watchdog_check(struct aq_softc * const sc)
-{
-
-	AQ_LOCKED(sc);
-
-	bool ok = true;
-	for (int n = 0; n < sc->sc_nqueues; n++) {
-		struct aq_txring *txring = &sc->sc_queue[n].txring;
-
-		mutex_enter(&txring->txr_mutex);
-		if (txring->txr_sending &&
-		    time_uptime - txring->txr_lastsent > aq_watchdog_timeout)
-			ok = false;
-
-		mutex_exit(&txring->txr_mutex);
-
-		if (!ok)
-			return false;
-	}
-
-	if (sc->sc_trigger_reset) {
-		/* debug operation, no need for atomicity or reliability */
-		sc->sc_trigger_reset = 0;
-		return false;
-	}
-
-	return true;
-}
-
-
-
-static bool
-aq_watchdog_tick(struct ifnet *ifp)
-{
-	struct aq_softc * const sc = ifp->if_softc;
-
-	AQ_LOCKED(sc);
-
-	if (!sc->sc_trigger_reset && aq_watchdog_check(sc))
-		return true;
-
-	if (atomic_swap_uint(&sc->sc_reset_pending, 1) == 0) {
-		workqueue_enqueue(sc->sc_reset_wq, &sc->sc_reset_work, NULL);
-	}
-
-	return false;
-}
-
-static void
-aq_tick(void *arg)
-{
-	struct aq_softc * const sc = arg;
-
-	AQ_LOCK(sc);
-	if (sc->sc_stopping) {
-		AQ_UNLOCK(sc);
-		return;
-	}
-
-	aq_update_link_status(sc);
-
-#ifdef AQ_EVENT_COUNTERS
-	if (sc->sc_poll_statistics)
-		aq_update_statistics(sc);
-#endif
-
-	struct ifnet * const ifp = &sc->sc_ethercom.ec_if;
-	const bool ok = aq_watchdog_tick(ifp);
-	if (ok)
-		callout_schedule(&sc->sc_tick_ch, hz);
-
-	AQ_UNLOCK(sc);
-}
-
-/* interrupt enable/disable */
-static void
-aq_enable_intr(struct aq_softc *sc, bool link, bool txrx)
-{
-	uint32_t imask = 0;
-	int i;
-
-	if (txrx) {
-		for (i = 0; i < sc->sc_nqueues; i++) {
-			imask |= __BIT(sc->sc_tx_irq[i]);
-			imask |= __BIT(sc->sc_rx_irq[i]);
-		}
-	}
-
-	if (link)
-		imask |= __BIT(sc->sc_linkstat_irq);
-
-	AQ_WRITE_REG(sc, AQ_INTR_MASK_REG, imask);
-	AQ_WRITE_REG(sc, AQ_INTR_STATUS_CLR_REG, 0xffffffff);
-}
-
-static int
-aq_legacy_intr(void *arg)
-{
-	struct aq_softc *sc = arg;
-	uint32_t status;
-	int nintr = 0;
-
-	status = AQ_READ_REG(sc, AQ_INTR_STATUS_REG);
-	AQ_WRITE_REG(sc, AQ_INTR_STATUS_CLR_REG, 0xffffffff);
-
-	if (status & __BIT(sc->sc_linkstat_irq)) {
-		AQ_LOCK(sc);
-		if (!sc->sc_stopping)
-			callout_schedule(&sc->sc_tick_ch, 0);
-		AQ_UNLOCK(sc);
-		nintr++;
-	}
-
-	if (status & __BIT(sc->sc_rx_irq[0])) {
-		nintr += aq_rx_intr(&sc->sc_queue[0].rxring);
-	}
-
-	if (status & __BIT(sc->sc_tx_irq[0])) {
-		nintr += aq_tx_intr(&sc->sc_queue[0].txring);
-	}
-
-	return nintr;
-}
-
-static int
-aq_txrx_intr(void *arg)
-{
-	struct aq_queue *queue = arg;
-	struct aq_softc *sc = queue->sc;
-	struct aq_txring *txring = &queue->txring;
-	struct aq_rxring *rxring = &queue->rxring;
-	uint32_t status;
-	int nintr = 0;
-	int txringidx, rxringidx, txirq, rxirq;
-
-	txringidx = txring->txr_index;
-	rxringidx = rxring->rxr_index;
-	txirq = sc->sc_tx_irq[txringidx];
-	rxirq = sc->sc_rx_irq[rxringidx];
-
-	status = AQ_READ_REG(sc, AQ_INTR_STATUS_REG);
-	if ((status & (__BIT(txirq) | __BIT(rxirq))) == 0) {
-		/* stray interrupt? */
-		return 0;
-	}
-
-	nintr += aq_rx_intr(rxring);
-	nintr += aq_tx_intr(txring);
-
-	return nintr;
-}
-
-static int
-aq_link_intr(void *arg)
-{
-	struct aq_softc * const sc = arg;
-	uint32_t status;
-	int nintr = 0;
-
-	status = AQ_READ_REG(sc, AQ_INTR_STATUS_REG);
-	if (status & __BIT(sc->sc_linkstat_irq)) {
-		AQ_LOCK(sc);
-		if (!sc->sc_stopping)
-			callout_schedule(&sc->sc_tick_ch, 0);
-		AQ_UNLOCK(sc);
-		AQ_WRITE_REG(sc, AQ_INTR_STATUS_CLR_REG,
-		    __BIT(sc->sc_linkstat_irq));
-		nintr++;
-	}
-
-	return nintr;
-}
-
-static void
-aq_txring_reset(struct aq_softc *sc, struct aq_txring *txring, bool start)
-{
-	const int ringidx = txring->txr_index;
-	int i;
-
-	mutex_enter(&txring->txr_mutex);
-
-	txring->txr_prodidx = 0;
-	txring->txr_considx = 0;
-	txring->txr_nfree = AQ_TXD_NUM;
-	txring->txr_active = false;
-
-	/* free mbufs untransmitted */
-	for (i = 0; i < AQ_TXD_NUM; i++) {
-		m_freem(txring->txr_mbufs[i].m);
-		txring->txr_mbufs[i].m = NULL;
-	}
-
-	/* disable DMA */
-	AQ_WRITE_REG_BIT(sc, TX_DMA_DESC_REG(ringidx), TX_DMA_DESC_EN, 0);
-
-	if (start) {
-		/* TX descriptor physical address */
-		paddr_t paddr = txring->txr_txdesc_dmamap->dm_segs[0].ds_addr;
-		AQ_WRITE_REG(sc, TX_DMA_DESC_BASE_ADDRLSW_REG(ringidx), paddr);
-		AQ_WRITE_REG(sc, TX_DMA_DESC_BASE_ADDRMSW_REG(ringidx),
-		    (uint32_t)((uint64_t)paddr >> 32));
-
-		/* TX descriptor size */
-		AQ_WRITE_REG_BIT(sc, TX_DMA_DESC_REG(ringidx), TX_DMA_DESC_LEN,
-		    AQ_TXD_NUM / 8);
-
-		/* reload TAIL pointer */
-		txring->txr_prodidx = txring->txr_considx =
-		    AQ_READ_REG(sc, TX_DMA_DESC_TAIL_PTR_REG(ringidx));
-		AQ_WRITE_REG(sc, TX_DMA_DESC_WRWB_THRESH_REG(ringidx), 0);
-
-		/* Mapping interrupt vector */
-		AQ_WRITE_REG_BIT(sc, AQ_INTR_IRQ_MAP_TX_REG(ringidx),
-		    AQ_INTR_IRQ_MAP_TX_IRQMAP(ringidx), sc->sc_tx_irq[ringidx]);
-		AQ_WRITE_REG_BIT(sc, AQ_INTR_IRQ_MAP_TX_REG(ringidx),
-		    AQ_INTR_IRQ_MAP_TX_EN(ringidx), true);
-
-		/* enable DMA */
-		AQ_WRITE_REG_BIT(sc, TX_DMA_DESC_REG(ringidx),
-		    TX_DMA_DESC_EN, 1);
-
-		const int cpuid = 0;	/* XXX? */
-		AQ_WRITE_REG_BIT(sc, TDM_DCAD_REG(ringidx),
-		    TDM_DCAD_CPUID, cpuid);
-		AQ_WRITE_REG_BIT(sc, TDM_DCAD_REG(ringidx),
-		    TDM_DCAD_CPUID_EN, 0);
-
-		txring->txr_active = true;
-	}
-
-	mutex_exit(&txring->txr_mutex);
-}
-
-static int
-aq_rxring_reset(struct aq_softc *sc, struct aq_rxring *rxring, bool start)
-{
-	const int ringidx = rxring->rxr_index;
-	int i;
-	int error = 0;
-
-	mutex_enter(&rxring->rxr_mutex);
-	rxring->rxr_active = false;
-	rxring->rxr_discarding = false;
-	if (rxring->rxr_receiving_m != NULL) {
-		m_freem(rxring->rxr_receiving_m);
-		rxring->rxr_receiving_m = NULL;
-		rxring->rxr_receiving_m_last = NULL;
-	}
-
-	/* disable DMA */
-	AQ_WRITE_REG_BIT(sc, RX_DMA_DESC_REG(ringidx), RX_DMA_DESC_EN, 0);
-
-	/* free all RX mbufs */
-	aq_rxdrain(sc, rxring);
-
-	if (start) {
-		for (i = 0; i < AQ_RXD_NUM; i++) {
-			error = aq_rxring_add(sc, rxring, i);
-			if (error != 0) {
-				aq_rxdrain(sc, rxring);
-				return error;
-			}
-			aq_rxring_reset_desc(sc, rxring, i);
-		}
-
-		/* RX descriptor physical address */
-		paddr_t paddr = rxring->rxr_rxdesc_dmamap->dm_segs[0].ds_addr;
-		AQ_WRITE_REG(sc, RX_DMA_DESC_BASE_ADDRLSW_REG(ringidx), paddr);
-		AQ_WRITE_REG(sc, RX_DMA_DESC_BASE_ADDRMSW_REG(ringidx),
-		    (uint32_t)((uint64_t)paddr >> 32));
-
-		/* RX descriptor size */
-		AQ_WRITE_REG_BIT(sc, RX_DMA_DESC_REG(ringidx), RX_DMA_DESC_LEN,
-		    AQ_RXD_NUM / 8);
-
-		/* maximum receive frame size */
-		AQ_WRITE_REG_BIT(sc, RX_DMA_DESC_BUFSIZE_REG(ringidx),
-		    RX_DMA_DESC_BUFSIZE_DATA, MCLBYTES / 1024);
-		AQ_WRITE_REG_BIT(sc, RX_DMA_DESC_BUFSIZE_REG(ringidx),
-		    RX_DMA_DESC_BUFSIZE_HDR, 0 / 1024);
-
-		AQ_WRITE_REG_BIT(sc, RX_DMA_DESC_REG(ringidx),
-		    RX_DMA_DESC_HEADER_SPLIT, 0);
-		AQ_WRITE_REG_BIT(sc, RX_DMA_DESC_REG(ringidx),
-		    RX_DMA_DESC_VLAN_STRIP,
-		    (sc->sc_ethercom.ec_capenable & ETHERCAP_VLAN_HWTAGGING) ?
-		    1 : 0);
-
-		/*
-		 * reload TAIL pointer, and update readidx
-		 * (HEAD pointer cannot write)
-		 */
-		rxring->rxr_readidx = AQ_READ_REG_BIT(sc,
-		    RX_DMA_DESC_HEAD_PTR_REG(ringidx), RX_DMA_DESC_HEAD_PTR);
-		AQ_WRITE_REG(sc, RX_DMA_DESC_TAIL_PTR_REG(ringidx),
-		    (rxring->rxr_readidx + AQ_RXD_NUM - 1) % AQ_RXD_NUM);
-
-		/* Rx ring set mode */
-
-		/* Mapping interrupt vector */
-		AQ_WRITE_REG_BIT(sc, AQ_INTR_IRQ_MAP_RX_REG(ringidx),
-		    AQ_INTR_IRQ_MAP_RX_IRQMAP(ringidx), sc->sc_rx_irq[ringidx]);
-		AQ_WRITE_REG_BIT(sc, AQ_INTR_IRQ_MAP_RX_REG(ringidx),
-		    AQ_INTR_IRQ_MAP_RX_EN(ringidx), 1);
-
-		const int cpuid = 0;	/* XXX? */
-		AQ_WRITE_REG_BIT(sc, RX_DMA_DCAD_REG(ringidx),
-		    RX_DMA_DCAD_CPUID, cpuid);
-		AQ_WRITE_REG_BIT(sc, RX_DMA_DCAD_REG(ringidx),
-		    RX_DMA_DCAD_DESC_EN, 0);
-		AQ_WRITE_REG_BIT(sc, RX_DMA_DCAD_REG(ringidx),
-		    RX_DMA_DCAD_HEADER_EN, 0);
-		AQ_WRITE_REG_BIT(sc, RX_DMA_DCAD_REG(ringidx),
-		    RX_DMA_DCAD_PAYLOAD_EN, 0);
-
-		/* enable DMA. start receiving */
-		AQ_WRITE_REG_BIT(sc, RX_DMA_DESC_REG(ringidx),
-		    RX_DMA_DESC_EN, 1);
-
-		rxring->rxr_active = true;
-	}
-
-	mutex_exit(&rxring->rxr_mutex);
-	return error;
-}
-
-#define TXRING_NEXTIDX(idx)	\
-	(((idx) >= (AQ_TXD_NUM - 1)) ? 0 : ((idx) + 1))
-#define RXRING_NEXTIDX(idx)	\
-	(((idx) >= (AQ_RXD_NUM - 1)) ? 0 : ((idx) + 1))
-
-static int
-aq_encap_txring(struct aq_softc *sc, struct aq_txring *txring, struct mbuf *m)
-{
-	bus_dmamap_t map;
-	uint32_t ctl1, ctl1_ctx, ctl2;
-	int idx, i, error;
-
-	idx = txring->txr_prodidx;
-	map = txring->txr_mbufs[idx].dmamap;
-
-	error = bus_dmamap_load_mbuf(sc->sc_dmat, map, m,
-	    BUS_DMA_WRITE | BUS_DMA_NOWAIT);
-	if (error == EFBIG) {
-		struct mbuf *n;
-		n = m_defrag(m, M_DONTWAIT);
-		if (n == NULL)
-			return EFBIG;
-		/* m_defrag() preserve m */
-		KASSERT(n == m);
-		error = bus_dmamap_load_mbuf(sc->sc_dmat, map, m,
-		    BUS_DMA_WRITE | BUS_DMA_NOWAIT);
-	}
-	if (error != 0)
-		return error;
-
-	/*
-	 * check spaces of free descriptors.
-	 * +1 is additional descriptor for context (vlan, etc,.)
-	 */
-	if ((map->dm_nsegs + 1) > txring->txr_nfree) {
-		bus_dmamap_unload(sc->sc_dmat, map);
-		return EAGAIN;
-	}
-
-	/* sync dma for mbuf */
-	bus_dmamap_sync(sc->sc_dmat, map, 0, map->dm_mapsize,
-	    BUS_DMASYNC_PREWRITE);
-
-	ctl1_ctx = 0;
-	ctl2 = __SHIFTIN(m->m_pkthdr.len, AQ_TXDESC_CTL2_LEN);
-
-	if (vlan_has_tag(m)) {
-		ctl1 = AQ_TXDESC_CTL1_TYPE_TXC;
-		ctl1 |= __SHIFTIN(vlan_get_tag(m), AQ_TXDESC_CTL1_VID);
-
-		ctl1_ctx |= AQ_TXDESC_CTL1_CMD_VLAN;
-		ctl2 |= AQ_TXDESC_CTL2_CTX_EN;
-
-		/* fill context descriptor and forward index */
-		txring->txr_txdesc[idx].buf_addr = 0;
-		txring->txr_txdesc[idx].ctl1 = htole32(ctl1);
-		txring->txr_txdesc[idx].ctl2 = 0;
-
-		idx = TXRING_NEXTIDX(idx);
-		txring->txr_nfree--;
-	}
-
-	if (m->m_pkthdr.csum_flags & M_CSUM_IPv4)
-		ctl1_ctx |= AQ_TXDESC_CTL1_CMD_IP4CSUM;
-	if (m->m_pkthdr.csum_flags &
-	    (M_CSUM_TCPv4 | M_CSUM_UDPv4 | M_CSUM_TCPv6 | M_CSUM_UDPv6)) {
-		ctl1_ctx |= AQ_TXDESC_CTL1_CMD_L4CSUM;
-	}
-
-	/* fill descriptor(s) */
-	for (i = 0; i < map->dm_nsegs; i++) {
-		ctl1 = ctl1_ctx | AQ_TXDESC_CTL1_TYPE_TXD |
-		    __SHIFTIN(map->dm_segs[i].ds_len, AQ_TXDESC_CTL1_BLEN);
-		ctl1 |= AQ_TXDESC_CTL1_CMD_FCS;
-
-		if (i == 0) {
-			/* remember mbuf of these descriptors */
-			txring->txr_mbufs[idx].m = m;
-		} else {
-			txring->txr_mbufs[idx].m = NULL;
-		}
-
-		if (i == map->dm_nsegs - 1) {
-			/* last segment, mark an EndOfPacket, and cause intr */
-			ctl1 |= AQ_TXDESC_CTL1_EOP | AQ_TXDESC_CTL1_CMD_WB;
-		}
-
-		txring->txr_txdesc[idx].buf_addr =
-		    htole64(map->dm_segs[i].ds_addr);
-		txring->txr_txdesc[idx].ctl1 = htole32(ctl1);
-		txring->txr_txdesc[idx].ctl2 = htole32(ctl2);
-
-		bus_dmamap_sync(sc->sc_dmat, txring->txr_txdesc_dmamap,
-		    sizeof(aq_tx_desc_t) * idx, sizeof(aq_tx_desc_t),
-		    BUS_DMASYNC_PREREAD | BUS_DMASYNC_PREWRITE);
-
-		idx = TXRING_NEXTIDX(idx);
-		txring->txr_nfree--;
-	}
-
-	txring->txr_prodidx = idx;
-
-	return 0;
-}
-
-static int
-aq_tx_intr(void *arg)
-{
-	struct aq_txring * const txring = arg;
-	struct aq_softc * const sc = txring->txr_sc;
-	struct ifnet * const ifp = &sc->sc_ethercom.ec_if;
-	struct mbuf *m;
-	const int ringidx = txring->txr_index;
-	unsigned int idx, hw_head, n = 0;
-
-	mutex_enter(&txring->txr_mutex);
-
-	if (!txring->txr_active)
-		goto tx_intr_done;
-
-	hw_head = AQ_READ_REG_BIT(sc, TX_DMA_DESC_HEAD_PTR_REG(ringidx),
-	    TX_DMA_DESC_HEAD_PTR);
-	if (hw_head == txring->txr_considx) {
-		txring->txr_sending = false;
-		goto tx_intr_done;
-	}
-
-	net_stat_ref_t nsr = IF_STAT_GETREF(ifp);
-
-	for (idx = txring->txr_considx; idx != hw_head;
-	    idx = TXRING_NEXTIDX(idx), n++) {
-
-		if ((m = txring->txr_mbufs[idx].m) != NULL) {
-			bus_dmamap_unload(sc->sc_dmat,
-			    txring->txr_mbufs[idx].dmamap);
-
-			if_statinc_ref(ifp, nsr, if_opackets);
-			if_statadd_ref(ifp, nsr, if_obytes, m->m_pkthdr.len);
-			if (m->m_flags & M_MCAST)
-				if_statinc_ref(ifp, nsr, if_omcasts);
-
-			m_freem(m);
-			txring->txr_mbufs[idx].m = NULL;
-		}
-
-		txring->txr_nfree++;
-	}
-	txring->txr_considx = idx;
-
-	IF_STAT_PUTREF(ifp);
-
-	/* no more pending TX packet, cancel watchdog */
-	if (txring->txr_nfree >= AQ_TXD_NUM)
-		txring->txr_sending = false;
-
- tx_intr_done:
-	mutex_exit(&txring->txr_mutex);
-
-	AQ_WRITE_REG(sc, AQ_INTR_STATUS_CLR_REG, __BIT(sc->sc_tx_irq[ringidx]));
-	return n;
-}
-
-static int
-aq_rx_intr(void *arg)
-{
-	struct aq_rxring * const rxring = arg;
-	struct aq_softc * const sc = rxring->rxr_sc;
-	struct ifnet * const ifp = &sc->sc_ethercom.ec_if;
-	const int ringidx = rxring->rxr_index;
-	aq_rx_desc_t *rxd;
-	struct mbuf *m, *m0, *mprev, *new_m;
-	uint32_t rxd_type, rxd_hash __unused;
-	uint16_t rxd_status, rxd_pktlen;
-	uint16_t rxd_nextdescptr __unused, rxd_vlan __unused;
-	unsigned int idx, n = 0;
-	bool discarding;
-
-	mutex_enter(&rxring->rxr_mutex);
-
-	if (!rxring->rxr_active)
-		goto rx_intr_done;
-
-	if (rxring->rxr_readidx == AQ_READ_REG_BIT(sc,
-	    RX_DMA_DESC_HEAD_PTR_REG(ringidx), RX_DMA_DESC_HEAD_PTR)) {
-		goto rx_intr_done;
-	}
-
-	net_stat_ref_t nsr = IF_STAT_GETREF(ifp);
-
-	/* restore ring context */
-	discarding = rxring->rxr_discarding;
-	m0 = rxring->rxr_receiving_m;
-	mprev = rxring->rxr_receiving_m_last;
-
-	for (idx = rxring->rxr_readidx;
-	    idx != AQ_READ_REG_BIT(sc, RX_DMA_DESC_HEAD_PTR_REG(ringidx),
-	    RX_DMA_DESC_HEAD_PTR); idx = RXRING_NEXTIDX(idx), n++) {
-
-		bus_dmamap_sync(sc->sc_dmat, rxring->rxr_rxdesc_dmamap,
-		    sizeof(aq_rx_desc_t) * idx, sizeof(aq_rx_desc_t),
-		    BUS_DMASYNC_POSTREAD | BUS_DMASYNC_POSTWRITE);
-
-		rxd = &rxring->rxr_rxdesc[idx];
-		rxd_status = le16toh(rxd->wb.status);
-
-		if ((rxd_status & RXDESC_STATUS_DD) == 0)
-			break;	/* not yet done */
-
-		rxd_type = le32toh(rxd->wb.type);
-		rxd_pktlen = le16toh(rxd->wb.pkt_len);
-		rxd_nextdescptr = le16toh(rxd->wb.next_desc_ptr);
-		rxd_hash = le32toh(rxd->wb.rss_hash);
-		rxd_vlan = le16toh(rxd->wb.vlan);
-
-		/*
-		 * Some segments are being dropped while receiving jumboframe.
-		 * Discard until EOP.
-		 */
-		if (discarding)
-			goto rx_next;
-
-		if ((rxd_status & RXDESC_STATUS_MACERR) ||
-		    (rxd_type & RXDESC_TYPE_MAC_DMA_ERR)) {
-			if_statinc_ref(ifp, nsr, if_ierrors);
-			if (m0 != NULL) {
-				m_freem(m0);
-				m0 = mprev = NULL;
-			}
-			discarding = true;
-			goto rx_next;
-		}
-
-		bus_dmamap_sync(sc->sc_dmat, rxring->rxr_mbufs[idx].dmamap, 0,
-		    rxring->rxr_mbufs[idx].dmamap->dm_mapsize,
-		    BUS_DMASYNC_POSTREAD);
-		m = rxring->rxr_mbufs[idx].m;
-
-		new_m = aq_alloc_mbuf();
-		if (new_m == NULL) {
-			/*
-			 * cannot allocate new mbuf.
-			 * discard this packet, and reuse mbuf for next.
-			 */
-			if_statinc_ref(ifp, nsr, if_iqdrops);
-			if (m0 != NULL) {
-				m_freem(m0);
-				m0 = mprev = NULL;
-			}
-			discarding = true;
-			goto rx_next;
-		}
-		rxring->rxr_mbufs[idx].m = NULL;
-		aq_rxring_setmbuf(sc, rxring, idx, new_m);
-
-		if (m0 == NULL) {
-			m0 = m;
-		} else {
-			if (m->m_flags & M_PKTHDR)
-				m_remove_pkthdr(m);
-			mprev->m_next = m;
-		}
-		mprev = m;
-
-		if ((rxd_status & RXDESC_STATUS_EOP) == 0) {
-			/* to be continued in the next segment */
-			m->m_len = MCLBYTES;
-		} else {
-			/* the last segment */
-			int mlen = rxd_pktlen % MCLBYTES;
-			if (mlen == 0)
-				mlen = MCLBYTES;
-			m->m_len = mlen;
-			m0->m_pkthdr.len = rxd_pktlen;
-			/* VLAN offloading */
-			if ((sc->sc_ethercom.ec_capenable &
-			    ETHERCAP_VLAN_HWTAGGING) &&
-			    (__SHIFTOUT(rxd_type, RXDESC_TYPE_PKTTYPE_VLAN) ||
-			    __SHIFTOUT(rxd_type,
-			    RXDESC_TYPE_PKTTYPE_VLAN_DOUBLE))) {
-				vlan_set_tag(m0, rxd_vlan);
-			}
-
-			/* Checksum offloading */
-			unsigned int pkttype_eth =
-			    __SHIFTOUT(rxd_type, RXDESC_TYPE_PKTTYPE_ETHER);
-			if ((ifp->if_capabilities & IFCAP_CSUM_IPv4_Rx) &&
-			    (pkttype_eth == RXDESC_TYPE_PKTTYPE_ETHER_IPV4) &&
-			    __SHIFTOUT(rxd_type,
-			    RXDESC_TYPE_IPV4_CSUM_CHECKED)) {
-				m0->m_pkthdr.csum_flags |= M_CSUM_IPv4;
-				if (__SHIFTOUT(rxd_status,
-				    RXDESC_STATUS_IPV4_CSUM_NG))
-					m0->m_pkthdr.csum_flags |=
-					    M_CSUM_IPv4_BAD;
-			}
-
-			/*
-			 * aq will always mark BAD for fragment packets,
-			 * but this is not a problem because the IP stack
-			 * ignores the CSUM flag in fragment packets.
-			 */
-			if (__SHIFTOUT(rxd_type,
-			    RXDESC_TYPE_TCPUDP_CSUM_CHECKED)) {
-				bool checked = false;
-				unsigned int pkttype_proto =
-				    __SHIFTOUT(rxd_type,
-				    RXDESC_TYPE_PKTTYPE_PROTO);
-
-				if (pkttype_proto ==
-				    RXDESC_TYPE_PKTTYPE_PROTO_TCP) {
-					if ((pkttype_eth ==
-					    RXDESC_TYPE_PKTTYPE_ETHER_IPV4) &&
-					    (ifp->if_capabilities &
-					    IFCAP_CSUM_TCPv4_Rx)) {
-						m0->m_pkthdr.csum_flags |=
-						    M_CSUM_TCPv4;
-						checked = true;
-					} else if ((pkttype_eth ==
-					    RXDESC_TYPE_PKTTYPE_ETHER_IPV6) &&
-					    (ifp->if_capabilities &
-					    IFCAP_CSUM_TCPv6_Rx)) {
-						m0->m_pkthdr.csum_flags |=
-						    M_CSUM_TCPv6;
-						checked = true;
-					}
-				} else if (pkttype_proto ==
-				    RXDESC_TYPE_PKTTYPE_PROTO_UDP) {
-					if ((pkttype_eth ==
-					    RXDESC_TYPE_PKTTYPE_ETHER_IPV4) &&
-					    (ifp->if_capabilities &
-					    IFCAP_CSUM_UDPv4_Rx)) {
-						m0->m_pkthdr.csum_flags |=
-						    M_CSUM_UDPv4;
-						checked = true;
-					} else if ((pkttype_eth ==
-					    RXDESC_TYPE_PKTTYPE_ETHER_IPV6) &&
-					    (ifp->if_capabilities &
-					    IFCAP_CSUM_UDPv6_Rx)) {
-						m0->m_pkthdr.csum_flags |=
-						    M_CSUM_UDPv6;
-						checked = true;
-					}
-				}
-				if (checked &&
-				    (__SHIFTOUT(rxd_status,
-				    RXDESC_STATUS_TCPUDP_CSUM_ERROR) ||
-				    !__SHIFTOUT(rxd_status,
-				    RXDESC_STATUS_TCPUDP_CSUM_OK))) {
-					m0->m_pkthdr.csum_flags |=
-					    M_CSUM_TCP_UDP_BAD;
-				}
-			}
-
-			m_set_rcvif(m0, ifp);
-			if_statinc_ref(ifp, nsr, if_ipackets);
-			if_statadd_ref(ifp, nsr, if_ibytes, m0->m_pkthdr.len);
-			if_percpuq_enqueue(ifp->if_percpuq, m0);
-			m0 = mprev = NULL;
-		}
-
- rx_next:
-		if (discarding && (rxd_status & RXDESC_STATUS_EOP) != 0)
-			discarding = false;
-
-		aq_rxring_reset_desc(sc, rxring, idx);
-		AQ_WRITE_REG(sc, RX_DMA_DESC_TAIL_PTR_REG(ringidx), idx);
-	}
-	/* save ring context */
-	rxring->rxr_readidx = idx;
-	rxring->rxr_discarding = discarding;
-	rxring->rxr_receiving_m = m0;
-	rxring->rxr_receiving_m_last = mprev;
-
-	IF_STAT_PUTREF(ifp);
-
- rx_intr_done:
-	mutex_exit(&rxring->rxr_mutex);
-
-	AQ_WRITE_REG(sc, AQ_INTR_STATUS_CLR_REG, __BIT(sc->sc_rx_irq[ringidx]));
-	return n;
-}
-
-static int
-aq_vlan_cb(struct ethercom *ec, uint16_t vid, bool set)
-{
-	struct ifnet * const ifp = &ec->ec_if;
-	struct aq_softc * const sc = ifp->if_softc;
-
-	aq_set_vlan_filters(sc);
-	return 0;
-}
-
-static int
-aq_ifflags_cb(struct ethercom *ec)
-{
-	struct ifnet * const ifp = &ec->ec_if;
-	struct aq_softc * const sc = ifp->if_softc;
-	int i, ecchange, error = 0;
-	unsigned short iffchange;
-
-	AQ_LOCK(sc);
-
-	iffchange = ifp->if_flags ^ sc->sc_if_flags;
-	if ((iffchange & IFF_PROMISC) != 0)
-		error = aq_set_filter(sc);
-
-	ecchange = ec->ec_capenable ^ sc->sc_ec_capenable;
-	if (ecchange & ETHERCAP_VLAN_HWTAGGING) {
-		for (i = 0; i < AQ_RINGS_NUM; i++) {
-			AQ_WRITE_REG_BIT(sc, RX_DMA_DESC_REG(i),
-			    RX_DMA_DESC_VLAN_STRIP,
-			    (ec->ec_capenable & ETHERCAP_VLAN_HWTAGGING) ?
-			    1 : 0);
-		}
-	}
-
-	/* vlan configuration depends on also interface promiscuous mode */
-	if ((ecchange & ETHERCAP_VLAN_HWFILTER) || (iffchange & IFF_PROMISC))
-		aq_set_vlan_filters(sc);
-
-	sc->sc_ec_capenable = ec->ec_capenable;
-	sc->sc_if_flags = ifp->if_flags;
-
-	AQ_UNLOCK(sc);
-
-	return error;
-}
-
-
-static int
-aq_init(struct ifnet *ifp)
-{
-	struct aq_softc * const sc = ifp->if_softc;
-
-	AQ_LOCK(sc);
-
-	int ret = aq_init_locked(ifp);
-
-	AQ_UNLOCK(sc);
-
-	return ret;
-}
-
-static int
-aq_init_locked(struct ifnet *ifp)
-{
-	struct aq_softc * const sc = ifp->if_softc;
-	int i, error = 0;
-
-	KASSERT(IFNET_LOCKED(ifp));
-	AQ_LOCKED(sc);
-
-	aq_stop_locked(ifp, false);
-
-	aq_set_vlan_filters(sc);
-	aq_set_capability(sc);
-
-	for (i = 0; i < sc->sc_nqueues; i++) {
-		aq_txring_reset(sc, &sc->sc_queue[i].txring, true);
-	}
-
-	/* invalidate RX descriptor cache */
-	AQ_WRITE_REG_BIT(sc, RX_DMA_DESC_CACHE_INIT_REG, RX_DMA_DESC_CACHE_INIT,
-	    AQ_READ_REG_BIT(sc,
-	    RX_DMA_DESC_CACHE_INIT_REG, RX_DMA_DESC_CACHE_INIT) ^ 1);
-
-	/* start RX */
-	for (i = 0; i < sc->sc_nqueues; i++) {
-		error = aq_rxring_reset(sc, &sc->sc_queue[i].rxring, true);
-		if (error != 0) {
-			device_printf(sc->sc_dev, "%s: cannot allocate rxbuf\n",
-			    __func__);
-			goto aq_init_failure;
-		}
-	}
-	aq_init_rss(sc);
-	if (HWTYPE_AQ1_P(sc))
-		aq1_hw_l3_filter_set(sc);
-
-	/* ring reset? */
-	aq_unset_stopping_flags(sc);
-
-	callout_schedule(&sc->sc_tick_ch, hz);
-
-	/* ready */
-	ifp->if_flags |= IFF_RUNNING;
-
-	/* start TX and RX */
-	aq_enable_intr(sc, /*link*/true, /*txrx*/true);
-	AQ_WRITE_REG_BIT(sc, TPB_TX_BUF_REG, TPB_TX_BUF_EN, 1);
-	AQ_WRITE_REG_BIT(sc, RPB_RPF_RX_REG, RPB_RPF_RX_BUF_EN, 1);
-
- aq_init_failure:
-	sc->sc_if_flags = ifp->if_flags;
-
-	return error;
-}
-
-static void
-aq_send_common_locked(struct ifnet *ifp, struct aq_softc *sc,
-    struct aq_txring *txring, bool is_transmit)
-{
-	struct mbuf *m, *n;
-	int npkt, error;
-
-	if (txring->txr_nfree < AQ_TXD_MIN)
-		return;
-
-	for (npkt = 0; ; npkt++) {
-		if (is_transmit)
-			m = pcq_peek(txring->txr_pcq);
-		else
-			IFQ_POLL(&ifp->if_snd, m);
-		if (m == NULL)
-			break;
-
-		error = aq_encap_txring(sc, txring, m);
-		if (error == EAGAIN) {
-			/* Not enough descriptors available. try again later */
-			break;
-		}
-
-		if (is_transmit)
-			pcq_get(txring->txr_pcq);
-		else
-			IFQ_DEQUEUE(&ifp->if_snd, n);
-
-		if (error != 0) {
-			/* too many mbuf chains? or other errors. */
-			m_freem(m);
-			if_statinc(ifp, if_oerrors);
-			break;
-		}
-
-		/* update tail ptr */
-		AQ_WRITE_REG(sc, TX_DMA_DESC_TAIL_PTR_REG(txring->txr_index),
-		    txring->txr_prodidx);
-
-		/* Pass the packet to any BPF listeners */
-		bpf_mtap(ifp, m, BPF_D_OUT);
-	}
-
-	if (npkt) {
-		/* Set a watchdog timer in case the chip flakes out. */
-		txring->txr_lastsent = time_uptime;
-		txring->txr_sending = true;
-	}
-}
-
-static void
-aq_start(struct ifnet *ifp)
-{
-	struct aq_softc * const sc = ifp->if_softc;
-	/* aq_start() always use TX ring[0] */
-	struct aq_txring * const txring = &sc->sc_queue[0].txring;
-
-	mutex_enter(&txring->txr_mutex);
-	if (txring->txr_active && !txring->txr_stopping)
-		aq_send_common_locked(ifp, sc, txring, false);
-	mutex_exit(&txring->txr_mutex);
-}
-
-static inline unsigned int
-aq_select_txqueue(struct aq_softc *sc, struct mbuf *m)
-{
-	return (cpu_index(curcpu()) % sc->sc_nqueues);
-}
-
-static int
-aq_transmit(struct ifnet *ifp, struct mbuf *m)
-{
-	struct aq_softc * const sc = ifp->if_softc;
-	const int ringidx = aq_select_txqueue(sc, m);
-	struct aq_txring * const txring = &sc->sc_queue[ringidx].txring;
-
-	if (__predict_false(!pcq_put(txring->txr_pcq, m))) {
-		m_freem(m);
-		return ENOBUFS;
-	}
-
-	if (mutex_tryenter(&txring->txr_mutex)) {
-		aq_send_common_locked(ifp, sc, txring, true);
-		mutex_exit(&txring->txr_mutex);
+	if (ifp->if_flags & IFF_PROMISC) {
+		ifp->if_flags |= IFF_ALLMULTI;
+		AQ_WRITE_REG_BIT(sc, RPF_L2BC_REG, RPF_L2BC_PROMISC, 1);
+	} else if (ac->ac_multirangecnt > 0 ||
+	    ac->ac_multicnt >= AQ_HW_MAC_NUM) {
+		ifp->if_flags |= IFF_ALLMULTI;
+		AQ_WRITE_REG_BIT(sc, RPF_L2BC_REG, RPF_L2BC_PROMISC, 0);
+		AQ_WRITE_REG_BIT(sc, RPF_MCAST_FILTER_MASK_REG,
+		    RPF_MCAST_FILTER_MASK_ALLMULTI, 1);
+		AQ_WRITE_REG_BIT(sc, RPF_MCAST_FILTER_REG(0),
+		    RPF_MCAST_FILTER_EN, 1);
 	} else {
-		kpreempt_disable();
-		softint_schedule(txring->txr_softint);
-		kpreempt_enable();
-	}
-	return 0;
-}
+		ifp->if_flags &= ~IFF_ALLMULTI;
+		idx = AQ_HW_MAC_OWN + 1;
 
-static void
-aq_deferred_transmit(void *arg)
-{
-	struct aq_txring * const txring = arg;
-	struct aq_softc * const sc = txring->txr_sc;
-	struct ifnet * const ifp = &sc->sc_ethercom.ec_if;
+		AQ_WRITE_REG_BIT(sc, RPF_L2BC_REG, RPF_L2BC_PROMISC, 0);
 
-	mutex_enter(&txring->txr_mutex);
-	if (pcq_peek(txring->txr_pcq) != NULL)
-		aq_send_common_locked(ifp, sc, txring, true);
-	mutex_exit(&txring->txr_mutex);
-}
-
-
-static void
-aq_unset_stopping_flags(struct aq_softc *sc)
-{
-
-	AQ_LOCKED(sc);
-
-	/* Must unset stopping flags in ascending order. */
-	for (int i = 0; i < sc->sc_nqueues; i++) {
-		struct aq_txring *txr = &sc->sc_queue[i].txring;
-		struct aq_rxring *rxr = &sc->sc_queue[i].rxring;
-
-		mutex_enter(&txr->txr_mutex);
-		txr->txr_stopping = false;
-		mutex_exit(&txr->txr_mutex);
-
-		mutex_enter(&rxr->rxr_mutex);
-		rxr->rxr_stopping = false;
-		mutex_exit(&rxr->rxr_mutex);
-	}
-
-	sc->sc_stopping = false;
-}
-
-static void
-aq_set_stopping_flags(struct aq_softc *sc)
-{
-
-	AQ_LOCKED(sc);
-
-	/* Must unset stopping flags in ascending order. */
-	for (int i = 0; i < sc->sc_nqueues; i++) {
-		struct aq_txring *txr = &sc->sc_queue[i].txring;
-		struct aq_rxring *rxr = &sc->sc_queue[i].rxring;
-
-		mutex_enter(&txr->txr_mutex);
-		txr->txr_stopping = true;
-		mutex_exit(&txr->txr_mutex);
-
-		mutex_enter(&rxr->rxr_mutex);
-		rxr->rxr_stopping = true;
-		mutex_exit(&rxr->rxr_mutex);
-	}
-
-	sc->sc_stopping = true;
-}
-
-
-static void
-aq_stop(struct ifnet *ifp, int disable)
-{
-	struct aq_softc * const sc = ifp->if_softc;
-
-	ASSERT_SLEEPABLE();
-	KASSERT(IFNET_LOCKED(ifp));
-
-	AQ_LOCK(sc);
-	aq_stop_locked(ifp, disable ? true : false);
-	AQ_UNLOCK(sc);
-}
-
-
-
-static void
-aq_stop_locked(struct ifnet *ifp, bool disable)
-{
-	struct aq_softc * const sc = ifp->if_softc;
-	int i;
-
-	KASSERT(IFNET_LOCKED(ifp));
-	AQ_LOCKED(sc);
-
-	aq_set_stopping_flags(sc);
-
-	if ((ifp->if_flags & IFF_RUNNING) == 0)
-		goto already_stopped;
-
-	/* disable tx/rx interrupts */
-	aq_enable_intr(sc, /*link*/true, /*txrx*/false);
-
-	AQ_WRITE_REG_BIT(sc, TPB_TX_BUF_REG, TPB_TX_BUF_EN, 0);
-	for (i = 0; i < sc->sc_nqueues; i++) {
-		aq_txring_reset(sc, &sc->sc_queue[i].txring, false);
-	}
-
-	AQ_WRITE_REG_BIT(sc, RPB_RPF_RX_REG, RPB_RPF_RX_BUF_EN, 0);
-	for (i = 0; i < sc->sc_nqueues; i++) {
-		aq_rxring_reset(sc, &sc->sc_queue[i].rxring, false);
-	}
-
-	/* invalidate RX descriptor cache */
-	AQ_WRITE_REG_BIT(sc, RX_DMA_DESC_CACHE_INIT_REG, RX_DMA_DESC_CACHE_INIT,
-	    AQ_READ_REG_BIT(sc,
-	    RX_DMA_DESC_CACHE_INIT_REG, RX_DMA_DESC_CACHE_INIT) ^ 1);
-
- already_stopped:
-	aq_enable_intr(sc, /*link*/false, /*txrx*/false);
-	callout_halt(&sc->sc_tick_ch, &sc->sc_mutex);
-
-	ifp->if_flags &= ~IFF_RUNNING;
-	sc->sc_if_flags = ifp->if_flags;
-}
-
-
-static void
-aq_handle_reset_work(struct work *work, void *arg)
-{
-	struct aq_softc * const sc = arg;
-	struct ifnet * const ifp = &sc->sc_ethercom.ec_if;
-
-	printf("%s: watchdog timeout -- resetting\n", ifp->if_xname);
-
-	AQ_LOCK(sc);
-
-	device_printf(sc->sc_dev, "%s: INTR_MASK/STATUS = %08x/%08x\n",
-	    __func__, AQ_READ_REG(sc, AQ_INTR_MASK_REG),
-	    AQ_READ_REG(sc, AQ_INTR_STATUS_REG));
-
-	for (int n = 0; n < sc->sc_nqueues; n++) {
-		struct aq_txring *txring = &sc->sc_queue[n].txring;
-		u_int head = AQ_READ_REG_BIT(sc,
-		    TX_DMA_DESC_HEAD_PTR_REG(txring->txr_index),
-		    TX_DMA_DESC_HEAD_PTR);
-		u_int tail = AQ_READ_REG(sc,
-		    TX_DMA_DESC_TAIL_PTR_REG(txring->txr_index));
-
-		device_printf(sc->sc_dev, "%s: TXring[%u] HEAD/TAIL=%u/%u\n",
-		    __func__, txring->txr_index, head, tail);
-
-		aq_tx_intr(txring);
-	}
-
-	AQ_UNLOCK(sc);
-
-	/* Don't want ioctl operations to happen */
-	IFNET_LOCK(ifp);
-
-	/* reset the interface. */
-	aq_init(ifp);
-
-	IFNET_UNLOCK(ifp);
-
-	atomic_store_relaxed(&sc->sc_reset_pending, 0);
-}
-
-static int
-aq_ioctl(struct ifnet *ifp, unsigned long cmd, void *data)
-{
-	struct aq_softc * const sc = ifp->if_softc;
-	struct ifreq * const ifr = data;
-	int error = 0;
-
-	switch (cmd) {
-	case SIOCADDMULTI:
-	case SIOCDELMULTI:
-		break;
-	default:
-		KASSERT(IFNET_LOCKED(ifp));
-	}
-
-	const int s = splnet();
-	switch (cmd) {
-	case SIOCSIFMTU:
-		if (ifr->ifr_mtu < ETHERMIN || ifr->ifr_mtu > sc->sc_max_mtu) {
-			error = EINVAL;
-		} else {
-			ifp->if_mtu = ifr->ifr_mtu;
-			error = 0;	/* no need to reset (no ENETRESET) */
+		ETHER_FIRST_MULTI(step, ac, enm);
+		while (enm != NULL) {
+			aq_set_mac_addr(sc, idx++, enm->enm_addrlo);
+			ETHER_NEXT_MULTI(step, enm);
 		}
-		break;
-	default:
-		error = ether_ioctl(ifp, cmd, data);
-		break;
+
+		for (; idx < AQ_HW_MAC_NUM; idx++)
+			aq_set_mac_addr(sc, idx, NULL);
+
+		AQ_WRITE_REG_BIT(sc, RPF_MCAST_FILTER_MASK_REG,
+		    RPF_MCAST_FILTER_MASK_ALLMULTI, 0);
+		AQ_WRITE_REG_BIT(sc, RPF_MCAST_FILTER_REG(0),
+		    RPF_MCAST_FILTER_EN, 0);
 	}
-	splx(s);
-
-	if (error != ENETRESET)
-		return error;
-
-	switch (cmd) {
-	case SIOCSIFCAP:
-		error = aq_set_capability(sc);
-		break;
-	case SIOCADDMULTI:
-	case SIOCDELMULTI:
-		AQ_LOCK(sc);
-		if ((sc->sc_if_flags & IFF_RUNNING) != 0) {
-			/*
-			 * Multicast list has changed; set the hardware filter
-			 * accordingly.
-			 */
-			error = aq_set_filter(sc);
-		}
-		AQ_UNLOCK(sc);
-		break;
-	}
-
-	return error;
 }
 
-
-MODULE(MODULE_CLASS_DRIVER, if_aq, "pci");
-
-#ifdef _MODULE
-#include "ioconf.c"
-#endif
-
-static int
-if_aq_modcmd(modcmd_t cmd, void *opaque)
+int
+aq_dmamem_alloc(struct aq_softc *sc, struct aq_dmamem *aqm,
+    bus_size_t size, u_int align)
 {
-	int error = 0;
+	aqm->aqm_size = size;
 
-	switch (cmd) {
-	case MODULE_CMD_INIT:
-#ifdef _MODULE
-		error = config_init_component(cfdriver_ioconf_if_aq,
-		    cfattach_ioconf_if_aq, cfdata_ioconf_if_aq);
-#endif
-		return error;
-	case MODULE_CMD_FINI:
-#ifdef _MODULE
-		error = config_fini_component(cfdriver_ioconf_if_aq,
-		    cfattach_ioconf_if_aq, cfdata_ioconf_if_aq);
-#endif
-		return error;
-	default:
-		return ENOTTY;
-	}
+	if (bus_dmamap_create(sc->sc_dmat, aqm->aqm_size, 1,
+	    aqm->aqm_size, 0,
+	    BUS_DMA_WAITOK | BUS_DMA_ALLOCNOW | BUS_DMA_64BIT,
+	    &aqm->aqm_map) != 0)
+		return (1);
+	if (bus_dmamem_alloc(sc->sc_dmat, aqm->aqm_size,
+	    align, 0, &aqm->aqm_seg, 1, &aqm->aqm_nsegs,
+	    BUS_DMA_WAITOK | BUS_DMA_ZERO) != 0)
+		goto destroy;
+	if (bus_dmamem_map(sc->sc_dmat, &aqm->aqm_seg, aqm->aqm_nsegs,
+	    aqm->aqm_size, &aqm->aqm_kva,
+	    BUS_DMA_WAITOK | BUS_DMA_COHERENT) != 0)
+		goto free;
+	if (bus_dmamap_load(sc->sc_dmat, aqm->aqm_map, aqm->aqm_kva,
+	    aqm->aqm_size, NULL, BUS_DMA_WAITOK) != 0)
+		goto unmap;
+
+	return (0);
+unmap:
+	bus_dmamem_unmap(sc->sc_dmat, aqm->aqm_kva, aqm->aqm_size);
+free:
+	bus_dmamem_free(sc->sc_dmat, &aqm->aqm_seg, 1);
+destroy:
+	bus_dmamap_destroy(sc->sc_dmat, aqm->aqm_map);
+	return (1);
+}
+
+void
+aq_dmamem_free(struct aq_softc *sc, struct aq_dmamem *aqm)
+{
+	bus_dmamap_unload(sc->sc_dmat, aqm->aqm_map);
+	bus_dmamem_unmap(sc->sc_dmat, aqm->aqm_kva, aqm->aqm_size);
+	bus_dmamem_free(sc->sc_dmat, &aqm->aqm_seg, 1);
+	bus_dmamap_destroy(sc->sc_dmat, aqm->aqm_map);
 }
