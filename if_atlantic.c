@@ -105,8 +105,21 @@
 
 // #if NBPFILTER > 0
 #include <net/bpf.h>
+#include <sys/cdefs.h>
 
-#include <sys/bus_dma.h>
+
+#include <sys/param.h>
+#include <machine/param.h>
+#include <sys/kernel.h>
+#include <sys/socket.h>
+#include <sys/bitstring.h>
+#include <net/if.h>
+#include <net/if_media.h>
+#include <net/if_var.h>
+#include <net/if_dl.h>
+#include <net/ethernet.h>
+#include <net/iflib.h>
+#include <netinet/in.h>
 // #endif
 
 /* #define AQ_DEBUG 1 */
