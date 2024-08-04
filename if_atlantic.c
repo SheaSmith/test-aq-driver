@@ -143,6 +143,8 @@ __FBSDID("$FreeBSD$");
 #include	<sys/param.h>
        #include	<sys/lock.h>
        #include	<sys/mutex.h>
+
+#include "if.h"
 // #endif
 
 /* #define AQ_DEBUG 1 */
