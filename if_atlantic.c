@@ -101,7 +101,7 @@
 
 #include <dev/pci/pcireg.h>
 #include <dev/pci/pcivar.h>
-#include <dev/pci/pcidevs.h>
+// #include <dev/pci/pcidevs.h>
 
 // #if NBPFILTER > 0
 #include <net/bpf.h>
